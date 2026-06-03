@@ -9,7 +9,6 @@ dist/
 OpenOCD/
 SVD/
 dist/
-Backup/
 cfg/
 *.spec
 

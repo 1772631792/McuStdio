@@ -597,7 +597,7 @@ class MCUStudioWindow(QMainWindow):
         ])
         self.wave_hz_combo.currentIndexChanged.connect(self.restart_sampling_thread)
         
-        self.custom_hz_edit = QLineEdit("300")
+        self.custom_hz_edit = QLineEdit("30")
         self.custom_hz_edit.setFixedWidth(55)
         self.custom_hz_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.custom_hz_edit.setFont(QFont("Consolas", 10, QFont.Weight.Bold))

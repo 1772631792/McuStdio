@@ -9,11 +9,20 @@ TYPE_SIZES = {
     "float": 4, "double": 8
 }
 
+QUALIFIER_PATTERN = re.compile(r'\b(?:const|volatile|static|extern|register|inline|__inline|__inline__|__packed|packed)\b')
+ATTRIBUTE_PATTERN = re.compile(r'__attribute__\s*\(\([^\)]*\)\)')
+
 class StructParser:
     def __init__(self):
-        self.structs = {}     
-        self.variables = []   
-        self.enums = set()  
+        self.structs = {}
+        self.variables = []
+        self.enums = set()
+
+    def normalize_type(self, ctype):
+        ctype = QUALIFIER_PATTERN.sub('', ctype)
+        ctype = ATTRIBUTE_PATTERN.sub('', ctype)
+        ctype = re.sub(r'\s+', ' ', ctype).strip()
+        return ctype
 
     def remove_comments(self, code):
         code = re.sub(r'//.*', '', code)
@@ -30,24 +39,48 @@ class StructParser:
         for enum_name in enum_matches:
             self.enums.add(enum_name.strip())
 
-        # 提取结构体
-        matches = re.findall(r'typedef[\s\xa0]+struct[\s\xa0]*\{(.*?)\}[\s\xa0]*(\w+)[\s\xa0]*;', code, flags=re.S)
-        for body, struct_name in matches:
+        # 提取 typedef struct ... 名称;
+        typedef_matches = re.findall(r'typedef[\s\xa0]+struct(?:[\s\xa0]+\w+)?[\s\xa0]*\{(.*?)\}[\s\xa0]*(\w+)[\s\xa0]*;', code, flags=re.S)
+        for body, struct_name in typedef_matches:
             members = []
             statements = body.split(';')
             for stmt in statements:
                 stmt = stmt.strip()
                 if not stmt: continue
+                if '(' in stmt or ')' in stmt: continue
                 m = re.match(r'(.+?)[\s\xa0]+(.+)', stmt)
                 if not m: continue
-                ctype = m.group(1).strip()
+                ctype = self.normalize_type(m.group(1).strip())
                 vars_list = m.group(2).strip().split(',')
                 for var in vars_list:
                     var = var.strip()
                     count = 1
                     arr = re.search(r'\[(\d+)\]', var)
                     if arr: count = int(arr.group(1))
-                    name = re.sub(r'\[.*?\]', '', var).strip()
+                    name = re.sub(r'\[.*?\]', '', var).replace('*', '').strip()
+                    members.append({"type": ctype, "name": name, "count": count})
+            self.structs[struct_name] = members
+
+        # 提取普通 struct 定义
+        struct_matches = re.findall(r'struct[\s\xa0]+(\w+)[\s\xa0]*\{(.*?)\}[\s\xa0]*;', code, flags=re.S)
+        for struct_name, body in struct_matches:
+            if struct_name in self.structs: continue
+            members = []
+            statements = body.split(';')
+            for stmt in statements:
+                stmt = stmt.strip()
+                if not stmt: continue
+                if '(' in stmt or ')' in stmt: continue
+                m = re.match(r'(.+?)[\s\xa0]+(.+)', stmt)
+                if not m: continue
+                ctype = self.normalize_type(m.group(1).strip())
+                vars_list = m.group(2).strip().split(',')
+                for var in vars_list:
+                    var = var.strip()
+                    count = 1
+                    arr = re.search(r'\[(\d+)\]', var)
+                    if arr: count = int(arr.group(1))
+                    name = re.sub(r'\[.*?\]', '', var).replace('*', '').strip()
                     members.append({"type": ctype, "name": name, "count": count})
             self.structs[struct_name] = members
 
@@ -57,23 +90,50 @@ class StructParser:
         return code
 
     def parse_variables(self, code):
+        def strip_initializer_blocks(text):
+            result = []
+            brace_level = 0
+            for ch in text:
+                if ch == '{':
+                    brace_level += 1
+                    continue
+                if ch == '}':
+                    if brace_level > 0:
+                        brace_level -= 1
+                    continue
+                if brace_level == 0:
+                    result.append(ch)
+            return ''.join(result)
+
         self.variables.clear()
         code = self.remove_comments(code)
+        code = re.sub(r'^\s*#.*$', '', code, flags=re.M)
         code = self.remove_struct_definitions(code)
         statements = code.split(';')
         for stmt in statements:
             stmt = stmt.strip()
             if not stmt: continue
+            if '(' in stmt or ')' in stmt: continue
+            stmt = strip_initializer_blocks(stmt)
+            stmt = QUALIFIER_PATTERN.sub('', stmt)
+            stmt = ATTRIBUTE_PATTERN.sub('', stmt)
+            stmt = re.sub(r'\s+', ' ', stmt).strip()
+            if not stmt: continue
             m = re.match(r'(.+?)[\s\xa0]+(.+)', stmt)
             if not m: continue
-            ctype = m.group(1).strip()
+            ctype = self.normalize_type(m.group(1).strip())
             vars_list = m.group(2).strip().split(',')
             for var in vars_list:
-                var = var.strip().split('=')[0].strip()
+                var = var.strip()
+                if not var or var.startswith('.'):
+                    continue
+                var = var.split('=')[0].strip()
+                if not var: continue
                 count = 1
                 arr = re.search(r'\[(\d+)\]', var)
                 if arr: count = int(arr.group(1))
-                name = re.sub(r'\[.*?\]', '', var).strip()
+                name = re.sub(r'\[.*?\]', '', var).replace('*', '').strip()
+                if not name: continue
                 self.variables.append({"type": ctype, "name": name, "count": count})
 
     def get_alignment(self, ctype):

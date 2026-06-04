@@ -28,7 +28,7 @@ import pyqtgraph as pg
 pg.setConfigOptions(useOpenGL=False, antialias=True)
 
 from struct_parser import StructParser
-
+from extract_param import AdvancedWorkspaceDialog
 try:
     import pylink
 except ImportError:
@@ -654,7 +654,7 @@ class MCUStudioWindow(QMainWindow):
         btn_add = QPushButton("➕ 快捷添加监视")
         btn_add.clicked.connect(self.quick_add_variable)
         
-        btn_adv_c = QPushButton("🚀 C 源码嵌套提炼结构体面板")
+        btn_adv_c = QPushButton("🚀C 源码工程提取变量")
         btn_adv_c.setStyleSheet("background-color: #0d47a1; color: white; font-weight: bold;")
         btn_adv_c.clicked.connect(self.open_advance_parser_window)
 
@@ -1270,27 +1270,48 @@ class MCUStudioWindow(QMainWindow):
         current_tab_idx = self.tab_widget.currentIndex()
         if current_tab_idx < 0: return
         
-        dlg = AdvanceCParserDialog(self.db, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            code = self.db.get_c_code()
-            self.parser.parse_structs(code)
-            self.parser.parse_variables(code)
+        from extract_param import AdvancedWorkspaceDialog
+        
+        # ⚡ 绝不重复开辟新实例，彻底摧毁之前的 dlg.exec() 死锁。
+        # 传入 symbol_cache 和 parent，确保子窗口能读取主窗口 ELF 符号表。
+        if not hasattr(self, 'adv_parse_dialog') or self.adv_parse_dialog is None:
+            self.adv_parse_dialog = AdvancedWorkspaceDialog(self.db, self.parser, symbol_cache=self.symbol_cache, parent=self)
+            self.adv_parse_dialog.symbol_selected_signal.connect(self.process_injected_symbol_from_workspace)
             
-            flattened_items = self.parser.flatten_all()
-            if not flattened_items:
-                QMessageBox.warning(self, "解析提示", "未能在源码中提炼出有效的全局变量定义，请检查结尾是否声明了实例。")
-                return
+        # ⚡ 工业级非模态唤醒机制：
+        self.adv_parse_dialog.show()
+        self.adv_parse_dialog.raise_()
+        self.adv_parse_dialog.activateWindow()
 
-            for item in flattened_items:
-                path = item['path']
-                v_type = item['type']
-                offset = item['offset']
-                base_var = path.split('.')[0].split('[')[0]
-                self.db.save_var(path, v_type, offset, base_var, current_tab_idx)
+    def process_injected_symbol_from_workspace(self, path, v_type, offset):
+        """
+        接收并处理并行面板发回来的符号实体，主子窗口同时存活互不干扰
+        """
+        current_tab_idx = self.tab_widget.currentIndex()
+        if current_tab_idx < 0: return
+        
+        base_var = path.split('.')[0].split('[')[0]
+        
+        # 1. 持久化到主系统的数据库中
+        self.db.save_var(path, v_type, offset, base_var, current_tab_idx)
+        
+        # 2. 如果是复合结构体，打散同步写缓存
+        if v_type in self.parser.structs:
+            sub_items = self.parser.flatten_struct(v_type, prefix=path + ".", base_offset=offset)
+            for sub in sub_items:
+                sub_base = sub['path'].split('.')[0].split('[')[0]
+                self.db.save_var(sub['path'], sub['type'], sub['offset'], sub_base, current_tab_idx)
+        
+        # 3. 动态无闪烁注入主页面左侧的监控树中
+        self.inject_var_to_tree_ui(path, v_type, current_tab_idx)
+        
+        all_db_vars = self.db.get_all_vars()
+        for row in all_db_vars:
+            h_path, h_type, _, _, t_idx = row[0], row[1], row[2], row[3], row[4] if len(row)>4 else 0
+            if t_idx == current_tab_idx and (h_path.startswith(path + ".") or h_path.startswith(path + "[")):
+                self.inject_var_to_tree_ui(h_path, h_type, current_tab_idx)
                 
-            flattened_items.sort(key=lambda x: (x['path'].count('.') + x['path'].count('[')))
-            for item in flattened_items:
-                self.inject_var_to_tree_ui(item['path'], item['type'], current_tab_idx)
+        print(f"⚡ 成功无缝添加变量：{path}")
 
     def handle_tree_item_double_clicked(self, item, column):
         if column != 2: return

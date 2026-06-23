@@ -1,0 +1,2410 @@
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: build/**, Debug/**, Release/**, *.o, *.hex, *.axf, *.bin, *.map, *.obj, *.d
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.gitignore
+extract_param.py
+live_set.py
+live_watch_history.db
+make_icon.py
+mcu_studio.ico
+pack-repo.bat
+param.db
+tiezi.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="pack-repo.bat">
+# 1. 确保终端走你的本地代理通道（防止卡死）
+$env:HTTP_PROXY="http://127.0.0.1:7890"; $env:HTTPS_PROXY="http://127.0.0.1:7890"
+
+# 2. 直接原生打包（排除掉你工程里常见的嵌入式编译杂质）
+npx repomix --ignore "build/**,Debug/**,Release/**,*.o,*.hex,*.axf,*.bin,*.map,*.obj,*.d"
+</file>
+
+<file path="extract_param.py">
+# -*- coding: utf-8 -*-
+# extract_param.py
+
+import os
+import sys
+import re
+import sqlite3
+import struct
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, 
+                             QPushButton, QTreeWidget, QTreeWidgetItem, 
+                             QSplitter, QLabel, QMessageBox, QHeaderView, QMenu)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QColor
+
+POPUP_MENU_STYLE = """
+    QMenu { background-color: #222222; color: #ffffff; border: 1px solid #444444; padding: 6px; font-family: "Microsoft YaHei", "Consolas"; font-size: 13px; font-weight: bold; }
+    QMenu::item { padding: 6px 28px 6px 16px; border-radius: 4px; background-color: transparent; color: #ffffff; }
+    QMenu::item:selected { background-color: #1e88e5; color: #ffffff; }
+    QMenu::separator { height: 1px; background-color: #444444; margin: 4px 0px; }
+"""
+
+STRICT_CONTROL_KEYWORDS = {'if', 'else', 'while', 'for', 'switch', 'return', 'break', 'continue', 'goto', 'typedef', 'void', 'main', 'struct', 'enum', 'union', 'extern'}
+C_MODIFIERS_CLEAN_REGEX = re.compile(r'\b(volatile|const|extern|register|inline|__inline|__inline__|__packed|packed)\b', re.IGNORECASE)
+STATIC_MATCH_REGEX = re.compile(r'\bstatic\b')
+QUALIFIER_PATTERN = re.compile(r'\b(const|volatile|static|extern|register|inline|__inline|__inline__|__packed|packed)\b')
+ATTRIBUTE_PATTERN = re.compile(r'__attribute__\s*\(\([^\)]*\)\)')
+
+TYPE_SIZES = {
+    "char": 1, "uint8_t": 1, "int8_t": 1, "uint8": 1, "int8": 1,
+    "uint16_t": 2, "int16_t": 2, "uint16": 2, "int16": 2,
+    "uint32_t": 4, "int32_t": 4, "uint32": 4, "int32": 4, "int": 4,
+    "float": 4, "double": 8
+}
+
+class InnerStructParser:
+    """内部集成式 C 结构体与数组对齐推演引擎"""
+    def __init__(self):
+        self.structs = {}
+        self.variables = []
+        self.enums = set()
+
+    def normalize_type(self, ctype):
+        ctype = QUALIFIER_PATTERN.sub('', ctype)
+        ctype = ATTRIBUTE_PATTERN.sub('', ctype)
+        ctype = re.sub(r'\s+', ' ', ctype).strip()
+        return ctype
+
+    def remove_comments(self, code):
+        code = re.sub(r'//.*', '', code)
+        code = re.sub(r'/\*.*?\*/', '', code, flags=re.S)
+        return code
+
+    def parse_structs(self, code):
+        code = self.remove_comments(code)
+        enum_matches = re.findall(r'typedef[\s\xa0]+enum[\s\xa0]*\{.*?\}(?:\s*__\w+__)?[\s\xa0]*(\w+)[\s\xa0]*;', code, flags=re.S)
+        for enum_name in enum_matches:
+            self.enums.add(enum_name.strip())
+
+        typedef_matches = re.findall(r'typedef[\s\xa0]+struct(?:[\s\xa0]+\w+)?[\s\xa0]*\{(.*?)\}[\s\xa0]*(\w+)[\s\xa0]*;', code, flags=re.S)
+        for body, struct_name in typedef_matches:
+            members = []
+            for stmt in body.split(';'):
+                stmt = stmt.strip()
+                if not stmt or '(' in stmt or ')' in stmt: continue
+                m = re.match(r'(.+?)[\s\xa0]+(.+)', stmt)
+                if not m: continue
+                ctype = self.normalize_type(m.group(1).strip())
+                for var in m.group(2).strip().split(','):
+                    var = var.strip()
+                    count = 1
+                    arr = re.search(r'\[(\d+)\]', var)
+                    if arr: count = int(arr.group(1))
+                    name = re.sub(r'\[.*?\]', '', var).replace('*', '').strip()
+                    members.append({"type": ctype, "name": name, "count": count})
+            self.structs[struct_name] = members
+
+        struct_matches = re.findall(r'struct[\s\xa0]+(\w+)[\s\xa0]*\{(.*?)\}[\s\xa0]*;', code, flags=re.S)
+        for struct_name, body in struct_matches:
+            if struct_name in self.structs: continue
+            members = []
+            for stmt in body.split(';'):
+                stmt = stmt.strip()
+                if not stmt or '(' in stmt or ')' in stmt: continue
+                m = re.match(r'(.+?)[\s\xa0]+(.+)', stmt)
+                if not m: continue
+                ctype = self.normalize_type(m.group(1).strip())
+                for var in m.group(2).strip().split(','):
+                    var = var.strip()
+                    count = 1
+                    arr = re.search(r'\[(\d+)\]', var)
+                    if arr: count = int(arr.group(1))
+                    name = re.sub(r'\[.*?\]', '', var).replace('*', '').strip()
+                    members.append({"type": ctype, "name": name, "count": count})
+            self.structs[struct_name] = members
+
+    def get_alignment(self, ctype):
+        if ctype in self.enums or ctype.replace("_t", "") in self.enums: return 4
+        if ctype in TYPE_SIZES: return TYPE_SIZES[ctype]
+        if ctype in self.structs:
+            max_align = 1
+            for member in self.structs[ctype]:
+                align = self.get_alignment(member['type'])
+                if align > max_align: max_align = align
+            return max_align
+        return 4
+
+    def sizeof(self, ctype):
+        if ctype in self.enums or ctype.replace("_t", "") in self.enums: return 4
+        if ctype in TYPE_SIZES: return TYPE_SIZES[ctype]
+        if ctype in self.structs:
+            total = 0
+            max_align = self.get_alignment(ctype)
+            for member in self.structs[ctype]:
+                m_type = member['type']
+                count = member['count']
+                m_size = self.sizeof(m_type)
+                m_align = self.get_alignment(m_type)
+                if total % m_align != 0:
+                    total += (m_align - (total % m_align))
+                total += m_size * count
+            if total % max_align != 0:
+                total += (max_align - (total % max_align))
+            return total
+        return 4
+
+    def flatten_struct(self, ctype, prefix="", base_offset=0):
+        result = []
+        if ctype not in self.structs: return result
+        offset = base_offset
+        for member in self.structs[ctype]:
+            m_type, m_name, count = member['type'], member['name'], member['count']
+            m_size = self.sizeof(m_type)
+            m_align = self.get_alignment(m_type)
+            
+            if offset % m_align != 0:
+                offset += (m_align - (offset % m_align))
+                
+            if m_type in self.structs:
+                if count == 1:
+                    path = f"{prefix}{m_name}"
+                    result.append({"path": path, "type": m_type, "offset": offset})
+                    result.extend(self.flatten_struct(m_type, prefix=path + ".", base_offset=offset))
+                    offset += m_size
+                else:
+                    result.append({"path": f"{prefix}{m_name}", "type": f"{m_type}[{count}]", "offset": offset})
+                    for i in range(count):
+                        arr_offset = offset + i * m_size
+                        path = f"{prefix}{m_name}[{i}]"
+                        result.append({"path": path, "type": m_type, "offset": arr_offset})
+                        result.extend(self.flatten_struct(m_type, prefix=path + ".", base_offset=arr_offset))
+                    offset += m_size * count
+            else:
+                if count == 1:
+                    path = f"{prefix}{m_name}"
+                    result.append({"path": path, "type": m_type, "offset": offset})
+                    offset += m_size
+                else:
+                    a_path = f"{prefix}{m_name}"
+                    result.append({"path": a_path, "type": f"{m_type}[{count}]", "offset": offset})
+                    for i in range(count):
+                        result.append({"path": f"{a_path}[{i}]", "type": m_type, "offset": offset + i * m_size})
+                    offset += m_size * count
+        return result
+
+    def flatten_variable(self, var):
+        """⚡【算法核心重写】：将顶级原生数组（如 float Test[3]）与嵌套结构体等同打散，强制产出级联子节点实体"""
+        result = []
+        v_type, v_name, count = var['type'], var['name'], var['count']
+        t_size = self.sizeof(v_type)
+        
+        if v_type in self.structs:
+            if count == 1:
+                result.append({"path": v_name, "type": v_type, "offset": 0})
+                result.extend(self.flatten_struct(v_type, prefix=v_name + ".", base_offset=0))
+            else:
+                result.append({"path": v_name, "type": f"{v_type}[{count}]", "offset": 0})
+                for i in range(count):
+                    base = i * t_size
+                    path = f"{v_name}[{i}]"
+                    result.append({"path": path, "type": v_type, "offset": base})
+                    result.extend(self.flatten_struct(v_type, prefix=path + ".", base_offset=base))
+        else:
+            # 💡 针对基础数据类型数组（如 float Test[3]），无条件生成带中括号的基础可展开子树记录
+            if count == 1:
+                result.append({"path": v_name, "type": v_type, "offset": 0})
+            else:
+                result.append({"path": v_name, "type": f"{v_type}[{count}]", "offset": 0})
+                for i in range(count):
+                    result.append({"path": f"{v_name}[{i}]", "type": v_type, "offset": i * t_size})
+        return result
+
+
+class ParamDB:
+    def __init__(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.db_path = os.path.join(base_dir, "param.db")
+        self.conn = None
+        self.cursor = None
+        try:
+            self.conn = sqlite3.connect(self.db_path, timeout=1.0)
+            self.cursor = self.conn.cursor()
+            self.init_tables()
+        except sqlite3.Error:
+            self.safe_destruction_and_rebuild()
+
+    def init_tables(self):
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS file_fingerprints (
+                file_path TEXT PRIMARY KEY, last_modified REAL
+            )''')
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS extracted_variables (
+                file_path TEXT, path TEXT, type TEXT, offset INTEGER,
+                PRIMARY KEY(file_path, path)
+            )''')
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ui_config (
+                key TEXT PRIMARY KEY, value TEXT
+            )''')
+        self.conn.commit()
+
+    def safe_destruction_and_rebuild(self):
+        try:
+            if self.conn: self.conn.close()
+        except: pass
+        if os.path.exists(self.db_path):
+            try: os.remove(self.db_path)
+            except: pass
+        self.conn = sqlite3.connect(self.db_path, timeout=1.0)
+        self.cursor = self.conn.cursor()
+        self.init_tables()
+
+    def get_config(self, key, default=""):
+        try:
+            self.cursor.execute("SELECT value FROM ui_config WHERE key=?", (key,))
+            row = self.cursor.fetchone()
+            return row[0] if row else default
+        except sqlite3.Error:
+            self.safe_destruction_and_rebuild()
+            return default
+
+    def save_config(self, key, value):
+        try:
+            self.cursor.execute("INSERT OR REPLACE INTO ui_config (key, value) VALUES (?, ?)", (key, str(value)))
+            self.conn.commit()
+        except sqlite3.Error:
+            self.safe_destruction_and_rebuild()
+
+    def get_last_modified(self, file_path):
+        try:
+            self.cursor.execute("SELECT last_modified FROM file_fingerprints WHERE file_path=?", (file_path,))
+            row = self.cursor.fetchone()
+            return row[0] if row else None
+        except sqlite3.Error:
+            self.safe_destruction_and_rebuild()
+            return None
+
+    def begin_transaction(self):
+        try: self.cursor.execute("BEGIN TRANSACTION")
+        except: pass
+
+    def end_transaction(self):
+        try: self.conn.commit()
+        except: pass
+
+    def update_file_fingerprint(self, file_path, mtime):
+        try: self.cursor.execute("INSERT OR REPLACE INTO file_fingerprints (file_path, last_modified) VALUES (?, ?)", (file_path, mtime))
+        except: pass
+
+    def clear_file_data(self, file_path):
+        try: self.cursor.execute("DELETE FROM extracted_variables WHERE file_path=?", (file_path,))
+        except: pass
+
+    def save_variable(self, file_path, path, v_type, offset):
+        try: self.cursor.execute("INSERT OR REPLACE INTO extracted_variables (file_path, path, type, offset) VALUES (?, ?, ?, ?)", (file_path, path, v_type, offset))
+        except: pass
+
+    def get_file_variables(self, file_path):
+        try:
+            self.cursor.execute("SELECT path, type, offset FROM extracted_variables WHERE file_path=?", (file_path,))
+            return [{"path": r[0], "type": r[1], "offset": r[2]} for r in self.cursor.fetchall()]
+        except sqlite3.Error:
+            self.safe_destruction_and_rebuild()
+            return []
+
+    def load_all_cached_records(self, root_dir):
+        try:
+            self.cursor.execute("SELECT file_path, path, type, offset FROM extracted_variables")
+            rows = self.cursor.fetchall()
+            file_map = {}
+            for f_path, p, t, off in rows:
+                if not f_path.startswith(root_dir): continue
+                rel_path = os.path.relpath(f_path, root_dir)
+                if rel_path not in file_map:
+                    file_map[rel_path] = {"rel_path": rel_path, "file_name": os.path.basename(f_path), "flattened": []}
+                file_map[rel_path]["flattened"].append({"path": p, "type": t, "offset": off})
+            return list(file_map.values())
+        except sqlite3.Error:
+            self.safe_destruction_and_rebuild()
+            return []
+
+    def close(self):
+        if self.conn:
+            try: self.conn.close()
+            except: pass
+
+
+class LocalCacheLoaderWorker(QThread):
+    cache_loaded_signal = pyqtSignal(list, str)
+
+    def __init__(self, project_root):
+        super().__init__()
+        self.project_root = project_root
+
+    def run(self):
+        if not self.project_root or not os.path.exists(self.project_root):
+            self.cache_loaded_signal.emit([], "INVALID_PATH")
+            return
+        pdb = ParamDB()
+        records = pdb.load_all_cached_records(self.project_root)
+        search_kw = pdb.get_config("last_source_search_keyword", "")
+        pdb.close()
+        self.cache_loaded_signal.emit(records, search_kw)
+
+
+class SourceCodeParserWorker(QThread):
+    progress_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(list)
+
+    def __init__(self, root_dir, parser_instance, force_refresh=False):
+        super().__init__()
+        self.root_dir = os.path.normpath(root_dir)
+        self.parser = parser_instance
+        self.force_refresh = force_refresh
+
+    def extract_variables_by_stream(self, content):
+        content = re.sub(r'//.*', '', content)
+        content = re.sub(r'/\*.*?\*/', '', content, flags=re.S)
+        content = re.sub(r'#\s*\w+.*', '', content)
+        content = content.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+        
+        output_chars = []
+        brace_level = 0
+        for char in content:
+            if char == '{':
+                if brace_level == 0: output_chars.append(';') 
+                brace_level += 1
+                continue
+            elif char == '}':
+                brace_level -= 1
+                if brace_level < 0: brace_level = 0
+                continue
+            if brace_level == 0: output_chars.append(char)
+                
+        stream_pure = "".join(output_chars)
+        statements = stream_pure.split(';')
+        results = []
+        
+        for stmt in statements:
+            stmt = stmt.strip()
+            if not stmt: continue
+            if re.match(r'^\s*(if|else|while|for|switch|return|break|continue)\b', stmt): continue
+            if '=' in stmt: stmt = stmt.split('=')[0].strip()
+                
+            stmt = C_MODIFIERS_CLEAN_REGEX.sub('', stmt).strip()
+            stmt = STATIC_MATCH_REGEX.sub('', stmt).strip()
+            stmt = re.sub(r'\s+', ' ', stmt).strip()
+            if not stmt: continue
+            if '(' in stmt or ')' in stmt: continue
+            if 'typedef ' in stmt: continue
+            
+            tokens = stmt.split(' ')
+            if len(tokens) < 2: continue
+            
+            target_var_token = tokens[-1].strip()
+            c_type = " ".join(tokens[:-1]).strip()
+            
+            if c_type in STRICT_CONTROL_KEYWORDS or target_var_token in STRICT_CONTROL_KEYWORDS: continue
+            if ' ' in target_var_token or ',' in target_var_token: continue 
+            
+            count = 1
+            arr_match = re.search(r'\[(\d+)\]', target_var_token)
+            if arr_match: count = int(arr_match.group(1))
+            var_name = re.sub(r'\[.*?\]', '', target_var_token).replace('*', '').strip()
+            
+            if not var_name or var_name in STRICT_CONTROL_KEYWORDS or var_name == c_type: continue
+            results.append({"name": var_name, "type": c_type, "count": count})
+        return results
+
+    def run(self):
+        file_records = []
+        valid_extensions = ('.c', '.h', '.C', '.H')
+        pdb = ParamDB()
+        target_files = []
+        for root, dirs, files in os.walk(self.root_dir):
+            for file in files:
+                if file.endswith(valid_extensions): target_files.append(os.path.join(root, file))
+
+        for full_path in target_files:
+            try:
+                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f: content = f.read()
+                self.parser.parse_structs(content) 
+            except: pass
+
+        pdb.begin_transaction()
+        try:
+            for full_path in target_files:
+                rel_path = os.path.relpath(full_path, self.root_dir)
+                file_name = os.path.basename(full_path)
+                current_mtime = os.path.getmtime(full_path)
+                cached_mtime = pdb.get_last_modified(full_path)
+                
+                if self.force_refresh or cached_mtime is None or current_mtime > cached_mtime:
+                    self.progress_signal.emit(f"深度提取中: {file_name}")
+                    with open(full_path, 'r', encoding='utf-8', errors='ignore') as f: content = f.read()
+                    
+                    raw_vars = self.extract_variables_by_stream(content)
+                    flattened_vars = []
+                    
+                    for v in raw_vars:
+                        flat_items = self.parser.flatten_variable(v)
+                        for fi in flat_items:
+                            flattened_vars.append({
+                                "path": fi["path"], "type": fi["type"], "offset": fi["offset"]
+                            })
+                    
+                    pdb.clear_file_data(full_path)
+                    for item in flattened_vars: 
+                        pdb.save_variable(full_path, item['path'], item['type'], item['offset'])
+                    pdb.update_file_fingerprint(full_path, current_mtime)
+                else:
+                    flattened_vars = pdb.get_file_variables(full_path)
+                
+                if flattened_vars:
+                    file_records.append({"rel_path": rel_path, "file_name": file_name, "flattened": flattened_vars})
+        except Exception as e:
+            print(f"解析异常: {e}")
+        finally:
+            pdb.end_transaction()
+            pdb.close()
+        self.finished_signal.emit(file_records)
+
+
+class AdvancedWorkspaceDialog(QWidget):
+    symbol_selected_signal = pyqtSignal(str, str, int)
+
+    def __init__(self, db, parser_instance, symbol_cache=None, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowCloseButtonHint | Qt.WindowType.WindowMaximizeButtonHint)
+        self.db = db
+        self.parser = parser_instance
+        self.symbol_cache = symbol_cache if isinstance(symbol_cache, (dict, list, set)) else {}
+        self.project_root = ""
+        self.all_file_records = [] 
+        
+        self.setWindowTitle("🛒 项目文件夹提取变量工作台")
+        self.resize(1150, 750)
+        self.init_ui()
+        
+        pdb = ParamDB()
+        self.project_root = pdb.get_config("last_source_project_root", "")
+        left_w = pdb.get_config("splitter_left_width", "")
+        right_w = pdb.get_config("splitter_right_width", "")
+        if left_w and right_w: self.splitter.setSizes([int(left_w), int(right_w)])
+        else: self.splitter.setSizes([380, 770])
+        pdb.close()
+        
+        self.status_lbl.setText("⏳ 正在进行本地快照无感离线反序列化加载...")
+        self.cache_worker = LocalCacheLoaderWorker(self.project_root)
+        self.cache_worker.cache_loaded_signal.connect(self.handle_cache_async_ready)
+        self.cache_worker.start()
+
+    def init_ui(self):
+        self.setStyleSheet("""
+            QWidget { background-color: #121212; color: #e0e0e0; font-family: "Microsoft YaHei", "Consolas"; }
+            QLabel { font-size: 13px; color: #b0bec5; }
+            QLineEdit { background-color: #1e1e1e; border: 1px solid #37474f; padding: 6px 10px; color: #ffffff; border-radius: 4px; font-size: 14px; font-family: "Consolas"; }
+            QLineEdit:focus { border: 1px solid #00e5ff; background-color: #262626; }
+            QPushButton { background-color: #263238; border: 1px solid #455a64; padding: 6px 14px; color: #ffffff; border-radius: 4px; font-size: 13px; font-weight: bold; }
+            QPushButton:hover { background-color: #37474f; border: 1px solid #00e5ff; }
+            QTreeWidget { background-color: #161616; border: 1px solid #263238; border-radius: 6px; alternate-background-color: #1d1d1d; }
+            QTreeWidget::item { height: 32px; border-bottom: 1px solid #212121; font-size: 14px; color: #e0e0e0; }
+            QTreeWidget::item:hover { background-color: #262626; color: #00e5ff; }
+            QTreeWidget::item:selected { background-color: #004d40; color: #00e676; font-weight: bold; }
+            QHeaderView::section { background-color: #212121; color: #00e5ff; padding: 6px; border: 1px solid #121212; font-weight: bold; font-size: 13px; }
+        """)
+        
+        layout = QVBoxLayout(self)
+        top_bar = QHBoxLayout()
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("🔍 输入最外层全局/静态变量实例名，右键无缝直接秒加主监视表...")
+        self.search_edit.textChanged.connect(self.execute_live_filter)
+        
+        self.btn_sync = QPushButton("🔍 智能增量同步")
+        self.btn_sync.setStyleSheet("background-color: #004d40; color: #00e676; border: 1px solid #00796b;")
+        self.btn_sync.clicked.connect(lambda: self.execute_async_parse_engine(force_refresh=False))
+        
+        self.btn_force = QPushButton("🔄 全量重载")
+        self.btn_force.clicked.connect(self.handle_force_reset_and_delete_db)
+        
+        btn_select_dir = QPushButton("📂 定位工程根目录")
+        btn_select_dir.clicked.connect(self.select_project_directory)
+        
+        top_bar.addWidget(QLabel("<b>全域动态检索:</b>"))
+        top_bar.addWidget(self.search_edit, 10)
+        top_bar.addWidget(self.btn_sync, 3)
+        top_bar.addWidget(self.btn_force, 2)
+        top_bar.addWidget(btn_select_dir, 3)
+        layout.addLayout(top_bar)
+        
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setStyleSheet("QSplitter::handle { width: 4px; background-color: #263238; }")
+        
+        self.file_tree = QTreeWidget()
+        self.file_tree.setHeaderLabels(["📁 工程源码树 (自动忽略非 C/H 文件)"])
+        self.file_tree.itemClicked.connect(self.handle_file_tree_node_clicked)
+        self.splitter.addWidget(self.file_tree)
+        
+        self.var_tree = QTreeWidget()
+        self.var_tree.setColumnCount(3)
+        self.var_tree.setHeaderLabels(["变量映射绝对路径", "C 原始数据类型", "扁平内存相对偏移"])
+        self.var_tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.var_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.var_tree.customContextMenuRequested.connect(self.show_variable_right_click_menu)
+        self.splitter.addWidget(self.var_tree)
+        
+        layout.addWidget(self.splitter)
+        self.status_lbl = QLabel("状态：就绪。")
+        self.status_lbl.setFixedHeight(20)
+        self.status_lbl.setStyleSheet("color: #00e5ff; font-family: 'Consolas'; font-size: 12px;")
+        layout.addWidget(self.status_lbl)
+
+    def handle_force_reset_and_delete_db(self):
+        if hasattr(self, 'worker') and self.worker.isRunning():
+            self.worker.terminate()
+            self.worker.wait()
+        pdb = ParamDB()
+        pdb.safe_destruction_and_rebuild()
+        pdb.close()
+        self.file_tree.clear()
+        self.var_tree.clear()
+        self.execute_async_parse_engine(force_refresh=True)
+
+    def handle_cache_async_ready(self, records, keyword):
+        self.all_file_records = records
+        self.search_edit.setText(keyword)
+        if self.project_root and os.path.exists(self.project_root):
+            self.render_file_tree_ui()
+            self.status_lbl.setText("🟢 离线快照加载完毕。")
+        else:
+            self.project_root = ""
+            self.status_lbl.setText("⚠️ 提示：请绑定有效的工程根目录！")
+
+    def select_project_directory(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path = QFileDialog.getExistingDirectory(self, "选择嵌入式工程源码的绝对根路径", self.project_root)
+        if path:
+            self.project_root = os.path.normpath(path)
+            pdb = ParamDB()
+            pdb.save_config("last_source_project_root", self.project_root)
+            pdb.close()
+            self.execute_async_parse_engine(force_refresh=False)
+
+    def execute_async_parse_engine(self, force_refresh=False):
+        if not self.project_root or not os.path.exists(self.project_root): return
+        self.status_lbl.setText("🚀 正在对工程源码执行极速并行差异性解构分析...")
+        self.file_tree.clear()
+        self.var_tree.clear()
+        
+        self.worker = SourceCodeParserWorker(self.project_root, self.parser, force_refresh=force_refresh)
+        self.worker.progress_signal.connect(lambda msg: self.status_lbl.setText(msg))
+        self.worker.finished_signal.connect(self.handle_parse_engine_callback)
+        self.worker.start()
+
+    def handle_parse_engine_callback(self, file_records):
+        self.all_file_records = file_records
+        self.status_lbl.setText(f"🟢 同步完毕！当前共解构出 {len(file_records)} 个有效文件符号节点。")
+        self.render_file_tree_ui()
+
+    def render_file_tree_ui(self):
+        self.file_tree.clear()
+        self.file_tree.setUpdatesEnabled(False)
+        for rec in self.all_file_records:
+            parts = rec["rel_path"].split(os.sep)
+            current_parent = None
+            for i, part in enumerate(parts):
+                found = False
+                if current_parent is None:
+                    for idx in range(self.file_tree.topLevelItemCount()):
+                        if self.file_tree.topLevelItem(idx).text(0) == part:
+                            current_parent = self.file_tree.topLevelItem(idx)
+                            found = True; break
+                else:
+                    for idx in range(current_parent.childCount()):
+                        if current_parent.child(idx).text(0) == part:
+                            current_parent = current_parent.child(idx)
+                            found = True; break
+                            
+                if not found:
+                    new_node = QTreeWidgetItem([part])
+                    if i == len(parts) - 1:
+                        new_node.setData(0, Qt.ItemDataRole.UserRole, rec)
+                        new_node.setForeground(0, Qt.GlobalColor.white)
+                    else:
+                        new_node.setForeground(0, QColor("#78909c"))
+                    if current_parent is None: self.file_tree.addTopLevelItem(new_node)
+                    else: current_parent.addChild(new_node)
+                    current_parent = new_node
+        self.file_tree.expandAll()
+        self.file_tree.setUpdatesEnabled(True)
+        self.execute_live_filter()
+
+    def handle_file_tree_node_clicked(self, item, col):
+        rec = item.data(0, Qt.ItemDataRole.UserRole)
+        if rec: self.render_target_variables_to_right_table(rec["flattened"])
+        else: self.var_tree.clear()
+
+    def render_target_variables_to_right_table(self, flattened_list):
+        self.var_tree.clear()
+        self.var_tree.setUpdatesEnabled(False)
+        for item in flattened_list:
+            path = item['path']
+            if '.' in path or '[' in path: continue 
+            v_type = item['type']
+            offset = item['offset']
+            new_node = QTreeWidgetItem([path, v_type, f"+ {offset} (0x{offset:02X})"])
+            new_node.setData(0, Qt.ItemDataRole.UserRole, (path, v_type, offset))
+            self.var_tree.addTopLevelItem(new_node)
+        self.var_tree.setUpdatesEnabled(True)
+
+    def execute_live_filter(self):
+        kw = self.search_edit.text().strip().lower()
+        pdb = ParamDB()
+        pdb.save_config("last_source_search_keyword", kw)
+        pdb.close()
+        if not kw:
+            selected_items = self.file_tree.selectedItems()
+            if selected_items: self.handle_file_tree_node_clicked(selected_items[0], 0)
+            return
+        filtered_flat_pool = []
+        for rec in self.all_file_records:
+            for item in rec["flattened"]:
+                if kw in item['path'].lower() or kw in item['type'].lower(): 
+                    filtered_flat_pool.append(item)
+        if filtered_flat_pool: self.render_target_variables_to_right_table(filtered_flat_pool)
+
+    def show_variable_right_click_menu(self, pos):
+        item = self.var_tree.itemAt(pos)
+        if not item: return
+        data_tuple = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data_tuple: return
+        path, v_type, offset = data_tuple
+            
+        menu = QMenu()
+        menu.setStyleSheet(POPUP_MENU_STYLE)
+        m_inject = menu.addAction("➕ 将此静态符号无缝添加到主监视栏")
+        act = menu.exec(self.var_tree.viewport().mapToGlobal(pos))
+        if act == m_inject:
+            self.symbol_selected_signal.emit(path, v_type, offset)
+
+    def closeEvent(self, event):
+        try:
+            sizes = self.splitter.sizes()
+            if len(sizes) == 2 and sizes[0] > 0:
+                pdb = ParamDB()
+                pdb.save_config("splitter_left_width", sizes[0])
+                pdb.save_config("splitter_right_width", sizes[1])
+                pdb.close()
+        except: pass
+        if hasattr(self, 'worker') and self.worker.isRunning(): self.worker.terminate()
+        event.accept()
+</file>
+
+<file path="make_icon.py">
+# make_icon.py
+import os
+from PIL import Image, ImageDraw
+
+def create_mcu_studio_icon():
+    # 创建一个 256x256 的高清图标画布，带透明通道
+    size = (256, 256)
+    image = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    
+    # 1. 绘制科技暗黑底座（圆角矩形）
+    # 边缘稍微留白，防止被系统裁剪
+    draw.rounded_rectangle([12, 12, 244, 244], radius=45, fill="#121212", outline="#1e88e5", width=4)
+    
+    # 2. 绘制深色微调网格背景（示波器质感）
+    for i in range(40, 220, 30):
+        # 横向网格线
+        draw.line([(16, i), (240, i)], fill="#222222", width=1)
+        # 纵向网格线
+        draw.line([(i, 16), (i, 240)], fill="#222222", width=1)
+        
+    # 3. 绘制芯片核心 (MCU 剪影)
+    # 芯片主体
+    draw.rectangle([78, 78, 178, 178], fill="#1e1e1e", outline="#90a4ae", width=3)
+    # 芯片引脚 (Pins)
+    for offset in range(90, 170, 20):
+        # 上引脚
+        draw.line([(offset, 64), (offset, 78)], fill="#90a4ae", width=3)
+        # 下引脚
+        draw.line([(offset, 178), (offset, 192)], fill="#90a4ae", width=3)
+        # 左引脚
+        draw.line([(64, offset), (78, offset)], fill="#90a4ae", width=3)
+        # 右引脚
+        draw.line([(178, offset), (192, offset)], fill="#90a4ae", width=3)
+
+    # 4. 绘制穿越芯片的高速绿光脉冲波形 (CH1 标志性波形)
+    wave_points = [
+        (24, 180), (60, 180), (85, 110), (110, 210), 
+        (135, 50), (160, 190), (185, 130), (232, 130)
+    ]
+    # 绘制外发光层（半透明绿色）
+    draw.line(wave_points, fill="#00E676", width=5, joint="round")
+    # 绘制内核心线（纯白高亮，极具极客电子感）
+    draw.line(wave_points, fill="#FFFFFF", width=2, joint="round")
+
+    # 5. 保存为 Windows 标准的高清多尺寸图标文件
+    icon_path = "mcu_studio.ico"
+    image.save(icon_path, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    print(f"⚡ 帅气的 MCU Studio 图标已成功生成在: {os.path.abspath(icon_path)}")
+
+if __name__ == "__main__":
+    # 如果提示缺少 PIL 库，请先执行: pip install Pillow
+    try:
+        create_mcu_studio_icon()
+    except ImportError:
+        print("❌ 检测到缺少 Pillow 库，正在自动为你安装...")
+        os.system("pip install Pillow")
+        create_mcu_studio_icon()
+</file>
+
+<file path="tiezi.md">
+没事搞了一个（STM32 等 Cortex-M 内核芯片）的免打断、高频变量数据实时波形监控工具，去除一切繁琐功能如断点类似的，保留最核心的变量实时显示和双击改值和波形显示，本工具主要是解决vscode编译烧录后最不好用的调试功能，感觉那些实时的插件都不是很好用
+
+工具已经全套封装成独立的 `.exe`，双击即可直接运行。目前主要想请经常调板子的老哥们帮忙测试一下各种芯片和仿真器的兼容性。
+
+### ⚡ 工具优点
+
+* **绝对不卡死 MCU，不影响实时控制**
+  采用后台高频内存直读（DAP管道/JLINK-DLL），MCU 在台前正常运行，不会乱reset，直接读值，默默读取默默退出。对电机控制、电源控制等极度友好。
+* **支持“半路热插拔现场抓取”，启动不强制 Reset**
+  工具启动时默认不发送任何 Reset 信号。如果单片机连续运行很久并突发 Bug，随时连上仿真器打开软件就能直接读出当前内存里的真实数据，完美保护崩溃现场。
+* **硬件断了可以手动恢复，不会直接像keil卡死**
+  在调试过程中，如果板子突然断电、复位或仿真器排线掉落，上位机绝对不会假死、卡屏或报错崩溃。后台会自动静默守护，硬件重新接上后通信即可手动恢复，稳定性希望帮忙测测，我自己是可以开发stm32和py32的。
+* **C 语言结构体粘代码树状拆解**
+  无需像 Ozone 或 Keil 那样必须在本地打开完整的工程源码。如果配合 VS Code 等轻量级编辑器开发，只需把 C 语言的 `struct` 定义和全局声明代码直接贴进面板，软件会自动拆解成可展开的树状图并计算好全部物理地址。
+* **自动解除占用，不耍流氓**
+  在关闭软件的瞬间，会自动释放所有底层硬件管道并断开通信。绝不锁死仿真器，关闭后可以无缝切换去 MDK 烧录或 Debug。
+
+### 软件界面截图
+
+![PixPin_2026-05-25_16-20-44.png](https://file1.elecfans.com/web3/M00/61/66/wKgZPGoUBmOAP7HxAAL1ZVXrXKM604.png)
+
+
+> 
+
+### 核心功能简述
+
+* **高速示波器画布** ：最高支持 8000Hz 极速采样数据流，支持单图/双图/三图分屏上下分布。按下`空格键`可锁定时间滚动，支持十字光标精准回溯时间戳与数值。
+* **双击改值** ：左侧树状主表约 5Hz 常规刷新，双击数值列即可直接输入新参数并敲回车，硬件级写入芯片内存（如 PID 在线调参）。
+* **只能人工复位** ：调过电流环或者can电机的应该了解过，reset byd会让电机疯掉或者板子炸掉，调试的时候
+* **只能人工重连** ：不会自动连，这样就不会线断了莫名卡死
+  ，人拥有最终解释权
+
+### 软件下载链接与注意事项
+
+**软件及说明书下载链接** ：
+通过网盘分享的文件：MCU_Live_Watch_Studio.zip
+链接: https://pan.baidu.com/s/1ociACgF3SCTeZmCj9csVzQ?pwd=1234 提取码: 1234
+--来自百度网盘超级会员v6的分享
+
+**测试避坑提示** ：
+
+1. 收到压缩包后 **务必先解压到本地固定文件夹** ，千万不要在压缩包内双击打开，否则历史记录数据库（`live_watch_history.db`）会因为临时路径无法读写。
+2. 结构体提炼时，代码末尾务必声明具体的“全局变量实例”（如 `MyStruct_t g_my_var;`），且变量名需与嵌入式 C 代码里的全局变量名完全一致。
+3. 本工具仅支持监视**全局变量**或 **静态全局变量（static）** ，局部变量由于随栈销毁，无法锁死物理地址进行长效监视。
+4. 有readme文件可以看看
+
+### 🙏 反馈求测
+
+目前个人测试覆盖面有限，国产 MCU（如 PY32、ST32 等）以及各类 DAP 仿真器的兼容性非常需要大家帮忙踩踩坑。
+
+大家在测试过程中如果遇到**无法握手、高频采样偶发断开、或者结构体解析 Offset 偏移不对**的问题，欢迎直接在帖子里回帖反馈！回帖时请顺便带上你的  **【操作系统 + 仿真器型号 + 目标芯片型号】** ，我会及时跟进优化，感谢支持！
+Q 1772631792
+</file>
+
+<file path=".gitignore">
+# 屏蔽 Python 编译缓存
+__pycache__/
+*.pyc
+
+# 屏蔽 编译工具链和打包输出（那几万个文件的罪魁祸首）
+arm-gcc/
+build/
+dist/
+OpenOCD/
+SVD/
+dist/
+cfg/
+*.spec
+</file>
+
+<file path="live_set.py">
+# live_set.py
+import sys
+import socket
+import subprocess
+import re
+import time
+import struct
+import sqlite3
+import os
+import psutil
+import bisect
+import platform  
+import numpy as np 
+
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                             QHBoxLayout, QTreeWidget, QTreeWidgetItem, 
+                             QPushButton, QComboBox, QLabel, QLineEdit, 
+                             QHeaderView, QMenu, QMessageBox, QDialog, QFileDialog, 
+                             QFormLayout, QCheckBox, QSplitter, QTextEdit, QRadioButton, QButtonGroup,
+                             QTabWidget, QTabBar)
+from PyQt6.QtCore import QTimer, Qt, QThread, pyqtSignal, QVariantAnimation, QMutex, QMutexLocker
+from PyQt6.QtGui import QFont, QKeyEvent, QIntValidator, QDoubleValidator, QColor, QAction, QPen
+
+import pyqtgraph as pg
+
+pg.setConfigOptions(useOpenGL=False, antialias=True)
+
+# 💡 完美闭环合并：从同级目录下的 extract_param 中直接引入对齐解析机
+from extract_param import InnerStructParser, AdvancedWorkspaceDialog
+
+try:
+    import pylink
+except ImportError:
+    pylink = None
+
+DARK_STYLE = """
+    QWidget { background-color: #1a1a1a; color: #e0e0e0; font-family: "Microsoft YaHei", "Consolas"; font-size: 12px; }
+    QDialog, QMainWindow { background-color: #121212; }
+    QLineEdit, QComboBox, QCheckBox, QTextEdit { background-color: #242424; border: 1px solid #333333; padding: 5px; color: #ffffff; border-radius: 6px; }
+    QLineEdit:focus, QComboBox:focus, QTextEdit:focus { border: 1px solid #1e88e5; background-color: #2a2a2a; }
+    QPushButton { background-color: #2d2d2d; border: 1px solid #424242; padding: 5px 12px; color: #ffffff; border-radius: 6px; font-weight: 500; }
+    QPushButton:hover { background-color: #3d3d3d; border: 1px solid #525252; }
+    QPushButton:disabled { background-color: #1f1f1f; color: #444444; border: 1px solid #222222; }
+    QLineEdit:disabled, QComboBox:disabled { background-color: #1a1a1a; color: #555555; border: 1px solid #222222; }
+    QTreeWidget { background-color: #161616; border: 1px solid #2d2d2d; border-radius: 8px; alternate-background-color: #1c1c1c; }
+    QTreeWidget::item { height: 26px; border-bottom: 1px solid #222222; }
+    QTreeWidget::item:hover { background-color: #262626; }
+    QTreeWidget::item:selected { background-color: #0d47a1; color: #ffffff; }
+    QHeaderView::section { background-color: #222222; color: #90a4ae; padding: 6px; border: 1px solid #121212; font-weight: bold; }
+    QSplitter::handle { background-color: #252525; }
+    QTreeWidget QLineEdit { background-color: #2c2c2c !important; border: 2px solid #1e88e5 !important; color: #ffffff !important; font-family: "Consolas" !important; font-size: 12px !important; font-weight: bold !important; padding: 1px 3px; }
+    
+    QTabWidget::pane { border: 1px solid #2d2d2d; background-color: #161616; border-radius: 8px; top: -1px; }
+    QTabBar::tab { background-color: #222222; color: #888888; border: 1px solid #2d2d2d; padding: 6px 15px; border-top-left-radius: 6px; border-top-right-radius: 6px; font-weight: bold; margin-right: 2px; }
+    QTabBar::tab:selected { background-color: #161616; color: #1e88e5; border-bottom-color: #161616; border-top: 2px solid #1e88e5; }
+"""
+
+POPUP_MENU_STYLE = """
+    QMenu { background-color: #222222; color: #ffffff; border: 1px solid #444444; padding: 6px; font-family: "Microsoft YaHei", "Consolas"; font-size: 13px; font-weight: bold; }
+    QMenu::item { padding: 6px 28px 6px 16px; border-radius: 4px; background-color: transparent; color: #ffffff; }
+    QMenu::item:selected { background-color: #1e88e5; color: #ffffff; }
+    QMenu::separator { height: 1px; background-color: #444444; margin: 4px 0px; }
+"""
+
+class ProjectConfig:
+    def __init__(self):
+        self.elf_path = ""
+        self.nm_path = ""
+        self.backend_mode = "JLINK" 
+        self.openocd_exe = ""
+        self.interface = ""  
+        self.target = ""     
+        self.jlink_dll_dir = ""        
+        self.jlink_device = "Cortex-M0+" 
+        self.svd_path = ""             
+        self.openocd_host = "127.0.0.1"
+        self.tcl_port = 6666
+        self.show_log_window = False  
+
+    def get_openocd_args(self):
+        exe_dir = os.path.dirname(self.openocd_exe) if self.openocd_exe else ""
+        scripts_path = os.path.abspath(os.path.join(exe_dir, "../share/openocd/scripts"))
+        if not os.path.exists(scripts_path): scripts_path = os.path.abspath(os.path.join(exe_dir, "scripts"))
+        
+        args = ["-s", scripts_path, "-c", f"bindto {self.openocd_host}", "-c", f"tcl_port {self.tcl_port}", "-c", "gdb_port 3333"]
+        if ":" in self.interface or "/" in self.interface or "\\" in self.interface:
+            args += ["-f", self.interface]
+        else:
+            args += ["-f", f"interface/{self.interface}"]
+
+        if ":" in self.target or "/" in self.target or "\\" in self.target:
+            args += ["-f", self.target]
+        else:
+            args += ["-f", f"target/{self.target}"]
+        return args
+
+class LiveWatchDB:
+    def __init__(self):
+        base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+        self.conn = sqlite3.connect(os.path.join(base_dir, "live_watch_history.db"))
+        self.cursor = self.conn.cursor()
+        try:
+            self.cursor.execute("SELECT offset, base_var FROM variables LIMIT 1")
+        except sqlite3.OperationalError:
+            self.cursor.execute("DROP TABLE IF EXISTS variables")
+
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS variables (
+                name TEXT, type TEXT, offset INTEGER, base_var TEXT, tab_idx INTEGER DEFAULT 0,
+                PRIMARY KEY (name, tab_idx)
+            )''')
+        self.cursor.execute('CREATE TABLE IF NOT EXISTS config_cache (key TEXT PRIMARY KEY, value TEXT)')
+        self.cursor.execute('CREATE TABLE IF NOT EXISTS c_code_cache (id INTEGER PRIMARY KEY, code TEXT)')
+        self.conn.commit()
+
+    def save_var(self, name, var_type, offset=0, base_var="", tab_idx=0):
+        self.cursor.execute("INSERT OR REPLACE INTO variables (name, type, offset, base_var, tab_idx) VALUES (?, ?, ?, ?, ?)", (name, var_type, offset, base_var, tab_idx))
+        self.conn.commit()
+
+    def delete_var(self, name, tab_idx=0):
+        self.cursor.execute("DELETE FROM variables WHERE name=? AND tab_idx=?", (name, tab_idx))
+        self.conn.commit()
+
+    def get_all_vars(self):
+        self.cursor.execute("SELECT name, type, offset, base_var, tab_idx FROM variables")
+        return self.cursor.fetchall()
+
+    def save_config(self, key, value):
+        self.cursor.execute("INSERT OR REPLACE INTO config_cache (key, value) VALUES (?, ?)", (key, value))
+        self.conn.commit()
+
+    def get_config(self, key, default=""):
+        self.cursor.execute("SELECT value FROM config_cache WHERE key=?", (key,))
+        row = self.cursor.fetchone()
+        return row[0] if row else default
+
+    def save_c_code(self, code):
+        self.cursor.execute("INSERT OR REPLACE INTO c_code_cache (id, code) VALUES (1, ?)", (code,))
+        self.conn.commit()
+
+    def get_c_code(self):
+        self.cursor.execute("SELECT code FROM c_code_cache WHERE id=1")
+        row = self.cursor.fetchone()
+        return row[0] if row else ""
+
+class LoginConfigDialog(QDialog):
+    def __init__(self, db):
+        super().__init__()
+        self.db = db
+        self.config = ProjectConfig()
+        self.is_connected = False
+        self.setWindowTitle("MCU Studio - 启动配置工作站")
+        self.resize(680, 540)
+        self.init_ui()
+        self.load_saved_config()
+        self.toggle_engine_fields()
+
+        self.detect_timer = QTimer(self)
+        self.detect_timer.timeout.connect(self.static_env_check)
+        self.detect_timer.start(1000)
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+        form = QFormLayout()
+        
+        self.elf_edit = QLineEdit()
+        btn_elf = QPushButton("...")
+        btn_elf.clicked.connect(lambda: self.select_file(self.elf_edit, "选择 ELF 固件", "ELF Files (*.elf)"))
+        h1 = QHBoxLayout(); h1.addWidget(self.elf_edit); h1.addWidget(btn_elf)
+        form.addRow("🔄 固件编译文件 (.elf):", h1)
+
+        self.nm_edit = QLineEdit()
+        btn_nm = QPushButton("...")
+        btn_nm.clicked.connect(lambda: self.select_file(self.nm_edit, "选择 nm.exe", "Executable (*.exe)"))
+        h2 = QHBoxLayout(); h2.addWidget(self.nm_edit); h2.addWidget(btn_nm)
+        form.addRow("🔨 NM 工具路径 (nm.exe):", h2)
+
+        form.addRow(QLabel("<hr/><b>🛠️ 调试器驱动内核主选择：</b>"))
+
+        self.driver_mode_combo = QComboBox()
+        self.driver_mode_combo.addItems(["J-Link 原生内核驱动 (无需OpenOCD/无需cfg)", "CMSIS-DAP / ST-Link (基于 OpenOCD)"])
+        self.driver_mode_combo.currentIndexChanged.connect(self.toggle_engine_fields)
+        form.addRow("🔌 调试驱动架构派系:", self.driver_mode_combo)
+
+        self.lbl_jl_dir = QLabel("📂 J-Link 驱动安装根路径:")
+        self.jlink_dir_edit = QLineEdit()
+        self.btn_jl_dir = QPushButton("...")
+        self.btn_jl_dir.clicked.connect(self.select_jlink_dir)
+        self.h_jl_dir = QHBoxLayout(); self.h_jl_dir.addWidget(self.jlink_dir_edit); self.h_jl_dir.addWidget(self.btn_jl_dir)
+
+        self.lbl_jl_dev = QLabel("🎯 芯片特定型号 (Device):")
+        self.jlink_device_edit = QLineEdit("Cortex-M0+")
+
+        self.lbl_jl_svd = QLabel("📋 寄存器映射描述 (.svd):")
+        self.svd_edit = QLineEdit()
+        self.btn_svd = QPushButton("...")
+        self.btn_svd.clicked.connect(lambda: self.select_file(self.svd_edit, "选择外设 SVD 描述文件", "SVD Files (*.svd *.txt)"))
+        self.h_jl_svd = QHBoxLayout(); self.h_jl_svd.addWidget(self.svd_edit); self.h_jl_svd.addWidget(self.btn_svd)
+
+        form.addRow(self.lbl_jl_dir, self.h_jl_dir)
+        form.addRow(self.lbl_jl_dev, self.jlink_device_edit)
+        form.addRow(self.lbl_jl_svd, self.h_jl_svd)
+
+        self.lbl_ocd_exe = QLabel("🚀 OpenOCD 路径 (openocd.exe):")
+        self.openocd_edit = QLineEdit()
+        self.btn_ocd = QPushButton("...")
+        self.btn_ocd.clicked.connect(lambda: self.select_file(self.openocd_edit, "选择 openocd.exe", "Executable (*.exe)"))
+        self.h_ocd_exe = QHBoxLayout(); self.h_ocd_exe.addWidget(self.openocd_edit); self.h_ocd_exe.addWidget(self.btn_ocd)
+
+        self.lbl_ocd_intf = QLabel("🔌 硬件调试器种类 (.cfg):")
+        self.interface_combo = QComboBox()
+        self.interface_combo.setEditable(True)
+        self.interface_combo.addItems(["cmsis-dap.cfg", "stlink.cfg"])
+        self.btn_browse_intf = QPushButton("...")
+        self.btn_browse_intf.clicked.connect(lambda: self.select_cfg_file(self.interface_combo, "interface"))
+        self.h_ocd_intf = QHBoxLayout(); self.h_ocd_intf.addWidget(self.interface_combo); self.h_ocd_intf.addWidget(self.btn_browse_intf)
+
+        self.lbl_ocd_targ = QLabel("🎯 目标芯片内核型号 (.cfg):")
+        self.target_combo = QComboBox()
+        self.target_combo.setEditable(True)
+        self.target_combo.addItems(["stm32f1x.cfg", "stm32f4x.cfg", "py32f0xx.cfg", "stm32f0x.cfg"])
+        self.btn_browse_target = QPushButton("...")
+        self.btn_browse_target.clicked.connect(lambda: self.select_cfg_file(self.target_combo, "target"))
+        self.h_ocd_targ = QHBoxLayout(); self.h_ocd_targ.addWidget(self.target_combo); self.h_ocd_targ.addWidget(self.btn_browse_target)
+
+        form.addRow(self.lbl_ocd_exe, self.h_ocd_exe)
+        form.addRow(self.lbl_ocd_intf, self.h_ocd_intf)
+        form.addRow(self.lbl_ocd_targ, self.h_ocd_targ)
+
+        self.log_checkbox = QCheckBox("显示硬件调试日志 to 独立黑框 (仅限OpenOCD)")
+        form.addRow("📋 调试黑框开关:", self.log_checkbox)
+
+        layout.addLayout(form)
+        layout.addSpacing(10)
+        
+        self.lbl_hardware_status = QLabel("🔍 准备就绪。")
+        self.lbl_hardware_status.setStyleSheet("color: #ffb300; font-weight: bold; padding: 5px;")
+        layout.addWidget(self.lbl_hardware_status)
+        
+        btns = QHBoxLayout()
+        self.btn_connect = QPushButton("⚡ 初始化硬件并进入工作站")
+        self.btn_connect.setStyleSheet("background-color: #1e88e5; font-weight: bold; padding: 10px 24px; color: white; font-size: 13px;")
+        self.btn_connect.clicked.connect(self.handle_connect)
+        btns.addStretch()
+        btns.addWidget(self.btn_connect)
+        layout.addLayout(btns)
+        self.setLayout(layout)
+
+    def toggle_engine_fields(self):
+        is_jlink = (self.driver_mode_combo.currentIndex() == 0)
+        self.jlink_dir_edit.setEnabled(is_jlink)
+        self.btn_jl_dir.setEnabled(is_jlink)
+        self.jlink_device_edit.setEnabled(is_jlink)
+        self.svd_edit.setEnabled(is_jlink)
+        self.btn_svd.setEnabled(is_jlink)
+
+        self.openocd_edit.setEnabled(not is_jlink)
+        self.btn_ocd.setEnabled(not is_jlink)
+        self.interface_combo.setEnabled(not is_jlink)
+        self.btn_browse_intf.setEnabled(not is_jlink)
+        self.target_combo.setEnabled(not is_jlink)
+        self.btn_browse_target.setEnabled(not is_jlink)
+        self.log_checkbox.setEnabled(not is_jlink)
+        self.static_env_check()
+
+    def static_env_check(self):
+        is_jlink_mode = (self.driver_mode_combo.currentIndex() == 0)
+        if is_jlink_mode:
+            if pylink is None:
+                self.lbl_hardware_status.setText("❌ 未检测到 pylink 库，请执行 pip install pylink-square")
+                self.lbl_hardware_status.setStyleSheet("color: #e53935; font-weight: bold;")
+            else:
+                self.lbl_hardware_status.setText("🟢 J-Link 原生运行环境就绪。")
+                self.lbl_hardware_status.setStyleSheet("color: #00E676; font-weight: bold;")
+        else:
+            exe = self.openocd_edit.text().strip()
+            if exe and os.path.exists(exe):
+                self.lbl_hardware_status.setText("🟡 OpenOCD 工具路径就绪。")
+                self.lbl_hardware_status.setStyleSheet("color: #00E5FF; font-weight: bold;")
+            else:
+                self.lbl_hardware_status.setText("⚠️ OpenOCD 路径待完善，可直接进入面板。")
+                self.lbl_hardware_status.setStyleSheet("color: #ffb300; font-weight: bold;")
+
+    def select_file(self, edit, title, flt):
+        path, _ = QFileDialog.getOpenFileName(self, title, "", flt)
+        if path: edit.setText(os.path.normpath(path))
+
+    def select_jlink_dir(self):
+        path = QFileDialog.getExistingDirectory(self, "选择 SEGGER J-Link 安装根目录")
+        if path: 
+            self.jlink_dir_edit.setText(os.path.normpath(path))
+            self.static_env_check()
+
+    def select_cfg_file(self, combo, subfolder):
+        exe_path = self.openocd_edit.text().strip()
+        initial_dir = ""
+        if exe_path and os.path.exists(exe_path):
+            scripts = os.path.abspath(os.path.join(os.path.dirname(exe_path), f"../share/openocd/scripts/{subfolder}"))
+            if os.path.exists(scripts): initial_dir = scripts
+        path, _ = QFileDialog.getOpenFileName(self, f"选择自定义 {subfolder} 配置文件", initial_dir, "Config Files (*.cfg)")
+        if path: combo.setEditText(os.path.normpath(path))
+
+    def load_saved_config(self):
+        self.elf_edit.setText(self.db.get_config("elf_path"))
+        self.nm_edit.setText(self.db.get_config("nm_path"))
+        self.openocd_edit.setText(self.db.get_config("openocd_exe"))
+        self.jlink_dir_edit.setText(self.db.get_config("jlink_dll_dir", "C:\\Program Files\\SEGGER\\JLink"))
+        self.jlink_device_edit.setText(self.db.get_config("jlink_device", "Cortex-M0+"))
+        self.svd_edit.setText(self.db.get_config("svd_path"))
+        
+        saved_mode = self.db.get_config("backend_mode", "JLINK")
+        self.driver_mode_combo.setCurrentIndex(0 if saved_mode == "JLINK" else 1)
+        
+        saved_intf = self.db.get_config("last_interface_cfg")
+        if saved_intf: self.interface_combo.setEditText(saved_intf)
+        saved_targ = self.db.get_config("last_target_cfg")
+        if saved_targ: self.target_combo.setEditText(saved_targ)
+
+    def handle_connect(self):
+        if hasattr(self, 'detect_timer'): self.detect_timer.stop()
+        self.config.elf_path = self.elf_edit.text().strip()
+        self.config.nm_path = self.nm_edit.text().strip()
+        self.config.backend_mode = "JLINK" if self.driver_mode_combo.currentIndex() == 0 else "OPENOCD"
+        
+        self.db.save_config("elf_path", self.config.elf_path)
+        self.db.save_config("nm_path", self.config.nm_path)
+        self.db.save_config("backend_mode", self.config.backend_mode)
+
+        if self.config.backend_mode == "OPENOCD":
+            self.config.openocd_exe = self.openocd_edit.text().strip()
+            self.config.interface = self.interface_combo.currentText().strip()
+            self.config.target = self.target_combo.currentText().strip()
+            self.config.show_log_window = self.log_checkbox.isChecked()
+
+            self.db.save_config("openocd_exe", self.config.openocd_exe)
+            self.db.save_config("last_interface_cfg", self.config.interface)
+            self.db.save_config("last_target_cfg", self.config.target)
+
+            for proc in psutil.process_iter(['name']):
+                if proc.info['name'] and 'openocd' in proc.info['name'].lower():
+                    try: proc.kill()
+                    except: pass
+            time.sleep(0.15)
+            
+            if self.config.openocd_exe and os.path.exists(self.config.openocd_exe):
+                cmd = [self.config.openocd_exe] + self.config.get_openocd_args()
+                si = subprocess.STARTUPINFO()
+                if not self.config.show_log_window:
+                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    si.wShowWindow = subprocess.SW_HIDE
+                subprocess.Popen(cmd, startupinfo=si, creationflags=subprocess.CREATE_NEW_CONSOLE)
+                time.sleep(0.5)
+        else: 
+            self.config.jlink_dll_dir = self.jlink_dir_edit.text().strip()
+            self.config.jlink_device = self.jlink_device_edit.text().strip()
+            self.config.svd_path = self.svd_edit.text().strip()
+            self.db.save_config("jlink_dll_dir", self.config.jlink_dll_dir)
+            self.db.save_config("jlink_device", self.config.jlink_device)
+            self.db.save_config("svd_path", self.config.svd_path)
+
+        self.is_connected = True
+        self.accept()
+
+
+class InPlaceEditLineEdit(QLineEdit):
+    editing_finished_signal = pyqtSignal(str)
+
+    def __init__(self, parent, initial_text, val_type):
+        super().__init__(parent)
+        self.setText(initial_text)
+        if "float" in val_type or "double" in val_type:
+            self.setValidator(QDoubleValidator(self))
+        else:
+            self.setValidator(QIntValidator(-2147483648, 2147483647, self))
+        self.selectAll()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.editing_finished_signal.emit(self.text().strip())
+        elif event.key() == Qt.Key.Key_Escape:
+            self.editing_finished_signal.emit("")  
+        else:
+            super().keyPressEvent(event)
+
+    def focusOutEvent(self, event):
+        self.editing_finished_signal.emit(self.text().strip())
+        super().focusOutEvent(event)
+
+
+class AdvanceCParserDialog(QDialog):
+    def __init__(self, db, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.setWindowTitle("高级 C 语言复杂嵌套结构体智能提炼工作台")
+        self.resize(750, 550)
+        
+        layout = QVBoxLayout()
+        self.editor = QTextEdit()
+        self.editor.setPlaceholderText("例如：\ntypedef struct {\n    float Kp;\n    float Ki;\n} PID_t;\n\nPID_t motor_pid;")
+        self.editor.setFont(QFont("Consolas", 11))
+        layout.addWidget(self.editor)
+        
+        btns = QHBoxLayout()
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(self.reject)
+        btn_run = QPushButton("🔍 智能树化解析并同步至全局主表")
+        btn_run.setStyleSheet("background-color: #1e88e5; font-weight: bold; padding: 6px 16px;")
+        btn_run.clicked.connect(self.do_parse)
+        
+        btns.addStretch()
+        btns.addWidget(btn_cancel)
+        btns.addWidget(btn_run)
+        layout.addLayout(btns)
+        self.setLayout(layout)
+        self.editor.setText(self.db.get_c_code())
+
+    def do_parse(self):
+        code = self.editor.toPlainText().strip()
+        if not code: return
+        self.db.save_c_code(code)
+        self.accept()
+
+
+class MCUStudioWindow(QMainWindow):
+    def __init__(self, config, db):
+        super().__init__()
+        self.config = config
+        self.db = db
+        self.setWindowTitle(f"MCU Live Watch Studio - [{'原生J-Link独占' if config.backend_mode=='JLINK' else 'OpenOCD驱动'}]")
+        self.resize(1450, 850)
+        
+        self.parser = InnerStructParser()
+        self.symbol_cache = {}
+        self.worker = None 
+        self.jlink_native_instance = None 
+        self.openocd_link_alive = False  
+        
+        self.ch_paths = [None, None, None]     
+        self.ch_types = [None, None, None]     
+        self.ch_addrs = [None, None, None]     
+        self.ch_buffers = [[], [], []]         
+        self.ch_time_stamps = [[], [], []]     
+        
+        self.buffer_mutex = QMutex()
+        self.layout_switching = False
+        self.current_layout_id = 1
+        
+        self.plot_active_paths = [[], [], []] 
+        self.plot_curves_dict = [{}, {}, {}] 
+        
+        self.start_time = time.time()          
+        self.max_display_duration_ms = 5000    
+        self.is_frozen = False
+        self.tcl_socket = None
+        self.heartbeat_state = False
+
+        self.init_global_link_backend()
+        self.load_elf_symbols()  
+        self.init_ui()
+        
+        self.restore_layout_and_type_configs()
+
+        self.timer_table = QTimer()
+        self.timer_table.timeout.connect(self.low_speed_tree_refresh)
+        self.timer_table.start(200)
+
+        self.timer_plot = QTimer()
+        self.timer_plot.timeout.connect(self.update_plot_canvas)
+        self.timer_plot.start(30) 
+
+        self.timer_heartbeat = QTimer()
+        self.timer_heartbeat.timeout.connect(self.update_hardware_heartbeat)
+        self.timer_heartbeat.start(300)
+
+        self.load_history_from_db()
+
+    def init_global_link_backend(self):
+        if self.config.backend_mode == "OPENOCD":
+            try:
+                self.tcl_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.tcl_socket.settimeout(0.3)
+                self.tcl_socket.connect((self.config.openocd_host, self.config.tcl_port))
+                self.openocd_link_alive = True
+                print("⚡ 主控 TCL 管道建立成功。")
+            except Exception as e:
+                self.openocd_link_alive = False
+                self.tcl_socket = None
+                print(f"⚠️ 管道初始连接未就绪: {e}")
+        else:
+            try:
+                if pylink is None: return
+                is_64bit_python = "64" in platform.architecture()[0]
+                dll_name = "JLink_x64.dll" if is_64bit_python else "JLinkARM.dll"
+                dll_file = os.path.join(self.config.jlink_dll_dir, dll_name)
+                
+                if not os.path.exists(dll_file):
+                    fallback_name = "JLinkARM.dll" if is_64bit_python else "JLink_x64.dll"
+                    dll_file = os.path.join(self.config.jlink_dll_dir, fallback_name)
+                
+                if os.path.exists(dll_file):
+                    os.environ['PATH'] = self.config.jlink_dll_dir + os.pathsep + os.environ.get('PATH', '')
+                    self.jlink_native_instance = pylink.JLink(lib=pylink.library.Library(dllpath=dll_file))
+                else:
+                    self.jlink_native_instance = pylink.JLink()
+                    
+                self.jlink_native_instance.open()
+                self.jlink_native_instance.set_tif(pylink.enums.JLinkInterfaces.SWD)
+                self.jlink_native_instance.connect(self.config.jlink_device, speed=4000)
+                print("⚡ 原生 J-Link 内核握手成功！")
+            except Exception as e:
+                self.jlink_native_instance = None
+                print(f"❌ 原生 J-Link 内核打开失败: {e}")
+
+    def load_elf_symbols(self):  
+        try:
+            if not self.config.nm_path or not self.config.elf_path: return
+            if not os.path.exists(self.config.nm_path) or not os.path.exists(self.config.elf_path): return
+            res = subprocess.run([self.config.nm_path, "-C", self.config.elf_path], stdout=subprocess.PIPE, text=True, check=True)
+            matches = re.findall(r"^([0-9a-fA-F]+)\s+[BbDdGgSs]\s+([a-zA-Z_][a-zA-Z0-9_]*)$", res.stdout, re.MULTILINE)
+            self.symbol_cache = {name: int(addr, 16) for addr, name in matches}
+            print(f"⚡ ELF 符号表加载成功，共包含 {len(self.symbol_cache)} 个有效全局变量。")
+        except Exception as e:
+            print(f"❌ ELF 符号表加载异常: {e}")
+
+    def send_write_command(self, addr_hex, val_int, width_bytes, is_float=False):
+        try:
+            addr = int(addr_hex, 16)
+            if self.config.backend_mode == "OPENOCD":
+                if not self.openocd_link_alive: return
+                if is_float:
+                    self.send_tcl_cmd(f"mww {addr_hex} {val_int}")
+                elif width_bytes == 1:
+                    self.send_tcl_cmd(f"mwb {addr_hex} {val_int & 0xFF}")
+                elif width_bytes == 2:
+                    self.send_tcl_cmd(f"mwh {addr_hex} {val_int & 0xFFFF}")
+                else:
+                    self.send_tcl_cmd(f"mww {addr_hex} {val_int & 0xFFFFFFFF}")
+            else:
+                if self.jlink_native_instance and self.jlink_native_instance.target_connected():
+                    if width_bytes == 1: self.jlink_native_instance.memory_write8(addr, [val_int & 0xFF])
+                    elif width_bytes == 2: self.jlink_native_instance.memory_write16(addr, [val_int & 0xFFFF])
+                    else: self.jlink_native_instance.memory_write32(addr, [val_int & 0xFFFFFFFF])
+        except Exception:
+            pass
+
+    def send_tcl_cmd(self, cmd):
+        if not self.tcl_socket or not self.openocd_link_alive: return "ERROR"
+        try:
+            self.tcl_socket.setblocking(False)
+            try:
+                while self.tcl_socket.recv(128): pass
+            except: pass
+            self.tcl_socket.setblocking(True)
+            self.tcl_socket.sendall(f"{cmd}\x1a".encode('utf-8'))
+            res = self.tcl_socket.recv(1024).decode('utf-8').replace('\x1a', '').strip()
+            if "ERROR" in res: raise Exception()
+            return res
+        except: 
+            self.openocd_link_alive = False 
+            return "ERROR"
+
+    def get_current_tree(self):
+        return self.tab_widget.currentWidget()
+
+    def keyPressEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key.Key_Delete:
+            tree = self.get_current_tree()
+            if tree:
+                item = tree.currentItem()
+                if item:
+                    root_item = item
+                    while root_item.parent(): root_item = root_item.parent()
+                    self.remove_variable_root(root_item)
+        elif event.key() == Qt.Key.Key_Space:
+            self.toggle_freeze()
+        else:
+            super().keyPressEvent(event)
+
+    def init_ui(self):
+        main_widget = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(10, 8, 10, 6) 
+        
+        top = QHBoxLayout()
+        self.wave_hz_combo = QComboBox()
+        self.wave_hz_combo.addItems([
+            "Custom (自定义频率)", "500 Hz 均衡流", "1000 Hz 高速流", 
+            "2000 Hz 极限级🚀", "4000 Hz 超极限⚡", "8000 Hz 毁灭级🔥"
+        ])
+        self.wave_hz_combo.currentIndexChanged.connect(self.restart_sampling_thread)
+        
+        self.custom_hz_edit = QLineEdit("30")
+        self.custom_hz_edit.setFixedWidth(55)
+        self.custom_hz_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.custom_hz_edit.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        self.custom_hz_edit.setValidator(QIntValidator(1, 8000, self))
+        self.custom_hz_edit.editingFinished.connect(self.restart_sampling_thread)
+        
+        self.btn_freeze = QPushButton("❄️ 锁定时间滚动")
+        self.btn_freeze.clicked.connect(self.toggle_freeze)
+        
+        self.btn_reconnect = QPushButton("🔌 重启通信后端")
+        self.btn_reconnect.clicked.connect(self.force_reconnect_engine)
+        
+        self.btn_mcu_reset = QPushButton("♻️ 强制复位")
+        self.btn_mcu_reset.setStyleSheet("background-color: #4a1515; color: #ff8a80;")
+        self.btn_mcu_reset.clicked.connect(self.trigger_manual_mcu_reset)
+
+        top.addWidget(QLabel("📊 采样速率:"))
+        top.addWidget(self.wave_hz_combo)
+        top.addWidget(self.custom_hz_edit)
+        top.addWidget(self.btn_freeze)
+        
+        top.addSpacing(10) 
+        top.addWidget(self.btn_reconnect) 
+        top.addWidget(self.btn_mcu_reset) 
+        top.addStretch()
+        
+        top.addWidget(QLabel("<b>🖼️ 画布同屏分布:</b>"))
+        self.layout_group = QButtonGroup(self)
+        self.rad_map1 = QRadioButton("单图 (1行独占)")
+        self.rad_map2 = QRadioButton("双图 (2行上下均匀)")
+        self.rad_map3 = QRadioButton("三图 (3行上下均匀)")
+        self.layout_group.addButton(self.rad_map1, 1)
+        self.layout_group.addButton(self.rad_map2, 2)
+        self.layout_group.addButton(self.rad_map3, 3)
+        self.rad_map1.setChecked(True)
+        top.addWidget(self.rad_map1)
+        top.addWidget(self.rad_map2)
+        top.addWidget(self.rad_map3)
+        self.layout_group.idClicked.connect(self.handle_layout_changed)
+        layout.addLayout(top)
+
+        quick_input_bar = QHBoxLayout()
+        self.input_name = QLineEdit()
+        self.input_name.setPlaceholderText("全局变量名或十六进制物理地址(如0x40012440)")
+        self.input_name.setFixedWidth(280)
+        
+        self.input_type = QComboBox()
+        self.input_type.addItems(["uint8", "int8", "uint16", "int16", "uint32", "int32", "int", "float"])
+        self.input_type.setFixedWidth(90)
+        self.input_type.currentIndexChanged.connect(lambda idx: self.db.save_config("last_input_type_idx", str(idx)))
+        
+        btn_add = QPushButton("➕ 快捷添加监视")
+        btn_add.clicked.connect(self.quick_add_variable)
+        
+        btn_adv_c = QPushButton("🚀C 源码工程提取变量")
+        btn_adv_c.setStyleSheet("background-color: #0d47a1; color: white; font-weight: bold;")
+        btn_adv_c.clicked.connect(self.open_advance_parser_window)
+
+        quick_input_bar.addWidget(QLabel("<b>⚡ 快捷输入栏:</b>"))
+        quick_input_bar.addWidget(self.input_name)
+        quick_input_bar.addWidget(self.input_type)
+        quick_input_bar.addWidget(btn_add)
+        quick_input_bar.addSpacing(20)
+        quick_input_bar.addWidget(btn_adv_c)
+        quick_input_bar.addStretch()
+        layout.addLayout(quick_input_bar)
+        
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setTabsClosable(True)
+        self.tab_widget.tabCloseRequested.connect(self.handle_tab_close_requested)
+        self.tab_widget.currentChanged.connect(lambda: self.restart_sampling_thread())
+        
+        self.btn_add_tab = QPushButton("➕")
+        self.btn_add_tab.setFixedWidth(30)
+        self.btn_add_tab.setToolTip("创建新变量调试窗口 (最多2个)")
+        self.btn_add_tab.clicked.connect(self.create_new_debug_tab)
+        self.tab_widget.setCornerWidget(self.btn_add_tab, Qt.Corner.TopRightCorner)
+        
+        self.create_new_debug_tab("主调试窗口")
+        self.main_splitter.addWidget(self.tab_widget)
+        
+        self.plot_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.plot_splitter.setStyleSheet("QSplitter::handle { height: 4px; background-color: #2a2a2a; }")
+        
+        self.plot_widgets = []
+        self.ch_colors = ['#00E676', '#FFD600', '#00E5FF'] 
+        self.v_lines = []
+        self.h_lines = []
+        self.hover_dots = []
+        self.hover_labels = []
+
+        for i in range(3):
+            pw = pg.PlotWidget()
+            pw.setBackground('#111111')
+            pw.showGrid(x=True, y=True, alpha=0.2)
+            pw.setLabel('bottom', '时间滚动追踪轴', units='ms')
+            pw.getViewBox().setDefaultPadding(0.0)
+            pw.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            pw.customContextMenuRequested.connect(lambda pos, idx=i: self.show_plot_context_menu(pos, idx))
+
+            v_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('#90a4ae', width=1, style=Qt.PenStyle.DashLine))
+            h_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('#90a4ae', width=1, style=Qt.PenStyle.DashLine))
+            v_line.setVisible(False)
+            h_line.setVisible(False)
+            pw.addItem(v_line)
+            pw.addItem(h_line)
+            self.v_lines.append(v_line)
+            self.h_lines.append(h_line)
+
+            hover_dot = pg.ScatterPlotItem(size=10, pen=pg.mkPen('#ffffff', width=2))
+            hover_dot.setVisible(False)
+            pw.addItem(hover_dot)
+            self.hover_dots.append(hover_dot)
+
+            hover_label = pg.TextItem(anchor=(0, 1), color='#ffffff', fill='#263238')
+            hover_label.setVisible(False)
+            pw.addItem(hover_label)
+            self.hover_labels.append(hover_label)
+            pw.scene().sigMouseMoved.connect(lambda pos, idx=i: self.handle_plot_mouse_move(pos, idx))
+
+            self.plot_widgets.append(pw)
+            self.plot_splitter.addWidget(pw)
+            
+        self.main_splitter.addWidget(self.plot_splitter)
+        self.main_splitter.setSizes([450, 1000])
+        layout.addWidget(self.main_splitter)
+        
+        bottom_bar = QHBoxLayout()
+        bottom_bar.setContentsMargins(5, 4, 5, 4)
+        self.lbl_ch1 = QLabel("CH1: 📭 空闲")
+        self.lbl_ch2 = QLabel("CH2: 📭 空闲")
+        self.lbl_ch3 = QLabel("CH3: 📭 空闲")
+        
+        ch_style = "font-family: 'Consolas'; font-size: 11px; font-weight: bold; padding: 2px 10px; border-radius: 4px; background-color: #161616; border: 1px solid #252525;"
+        self.lbl_ch1.setStyleSheet(f"{ch_style} color: #00E676;")
+        self.lbl_ch2.setStyleSheet(f"{ch_style} color: #FFD600;")
+        self.lbl_ch3.setStyleSheet(f"{ch_style} color: #00E5FF;")
+        
+        bottom_bar.addWidget(self.lbl_ch1)
+        bottom_bar.addWidget(self.lbl_ch2)
+        bottom_bar.addWidget(self.lbl_ch3)
+        bottom_bar.addStretch()
+        
+        self.lbl_led = QLabel()
+        self.lbl_led.setFixedSize(10, 10)
+        self.lbl_led.setStyleSheet("background-color: #d32f2f; border-radius: 5px;")
+        self.lbl_status_text = QLabel("正在连接...")
+        self.lbl_status_text.setStyleSheet("color: #757575; font-family: 'Microsoft YaHei'; font-size: 11px; font-weight: bold;")
+        
+        bottom_bar.addWidget(self.lbl_led)
+        bottom_bar.addWidget(self.lbl_status_text)
+        
+        bottom_wrapper = QWidget()
+        bottom_wrapper.setFixedHeight(28) 
+        bottom_wrapper.setLayout(bottom_bar)
+        layout.addWidget(bottom_wrapper)
+        
+        main_widget.setLayout(layout)
+        self.setCentralWidget(main_widget)
+
+    def create_new_debug_tab(self, name=None):
+        if self.tab_widget.count() >= 2:
+            QMessageBox.warning(self, "标签页上限", "最多只允许开启 2 个变量调试窗口。")
+            return
+        if not name: name = f"窗口 {self.tab_widget.count() + 1}"
+            
+        tree = QTreeWidget()
+        tree.setColumnCount(3)
+        tree.setHeaderLabels(["全局变量路径节点 (树状结构)", "底层数据类型", "实时物理数值 (5Hz后台)"])
+        tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        tree.customContextMenuRequested.connect(self.show_context_menu)
+        tree.itemDoubleClicked.connect(self.handle_tree_item_double_clicked)
+        
+        new_idx = self.tab_widget.addTab(tree, name)
+        self.tab_widget.setCurrentIndex(new_idx)
+        if self.tab_widget.count() >= 2: self.btn_add_tab.setEnabled(False)
+
+    def handle_tab_close_requested(self, index):
+        if self.tab_widget.count() <= 1:
+            QMessageBox.warning(self, "禁止关闭", "至少需要保留一个正在执行的变量调试主窗口。")
+            return
+        tree = self.tab_widget.widget(index)
+        for i in range(tree.topLevelItemCount()):
+            item = tree.topLevelItem(i)
+            root_name = item.text(0)
+            for path, _, _, _, t_idx in self.db.get_all_vars():
+                if t_idx == index and (path == root_name or path.startswith(root_name + ".") or path.startswith(root_name + "[")):
+                    self.db.delete_var(path, tab_idx=t_idx)
+        for i in range(3): self.unbind_channel(i)
+        self.tab_widget.removeTab(index)
+        self.btn_add_tab.setEnabled(True)
+        self.restart_sampling_thread()
+
+    def toggle_freeze(self):
+        self.is_frozen = not self.is_frozen
+        if self.is_frozen:
+            self.btn_freeze.setText("▶️ 恢复滚动追踪")
+            self.btn_freeze.setStyleSheet("background-color: #e65100;")
+        else:
+            self.btn_freeze.setText("❄️ 锁定时间滚动")
+            self.btn_freeze.setStyleSheet("background-color: #2d2d2d;")
+            for i in range(3):
+                if self.v_lines[i]: self.v_lines[i].setVisible(False)
+                if self.h_lines[i]: self.h_lines[i].setVisible(False)
+                if self.hover_dots[i]: self.hover_dots[i].setVisible(False)
+                if self.hover_labels[i]: self.hover_labels[i].setVisible(False)
+
+    def trigger_manual_mcu_reset(self):
+        self._execute_flash_animation(self.btn_mcu_reset, "#e53935", "color: #ff8a80;")
+        if self.config.backend_mode == "OPENOCD":
+            if self.openocd_link_alive and self.tcl_socket:
+                try:
+                    self.tcl_socket.setblocking(True)
+                    self.tcl_socket.sendall(b"reset run\x1a")
+                    try: self.tcl_socket.recv(512)
+                    except: pass
+                except: pass
+        else:
+            if self.jlink_native_instance and self.jlink_native_instance.target_connected(): 
+                try: self.jlink_native_instance.reset()
+                except: pass
+        self.force_reconnect_engine()
+
+    def force_reconnect_engine(self):
+        self._execute_flash_animation(self.btn_reconnect, "#00b0ff", "")
+        if self.config.backend_mode == "OPENOCD":
+            if self.tcl_socket: 
+                try: self.tcl_socket.close()
+                except: pass
+            for proc in psutil.process_iter(['name']):
+                if proc.info['name'] and 'openocd' in proc.info['name'].lower(): 
+                    try: proc.kill()
+                    except: pass
+            time.sleep(0.2)
+            cmd = [self.config.openocd_exe] + self.config.get_openocd_args()
+            subprocess.Popen(cmd, startupinfo=subprocess.STARTINFO(), creationflags=subprocess.CREATE_NEW_CONSOLE)
+            time.sleep(0.6)
+        self.init_global_link_backend()
+        self.restart_sampling_thread()
+
+    def _execute_flash_animation(self, button, target_color, base_style):
+        anim = QVariantAnimation(button)
+        anim.setDuration(220) 
+        anim.setStartValue(QColor(target_color))
+        anim.setEndValue(QColor("#2d2d2d")) 
+        anim.valueChanged.connect(lambda val: button.setStyleSheet(f"{base_style} background-color: {val.name()};"))
+        anim.start()
+
+    def handle_layout_changed(self, layout_id):
+        self.layout_switching = True
+        self.current_layout_id = layout_id
+        self.db.save_config("last_layout_id", str(layout_id))
+        
+        with QMutexLocker(self.buffer_mutex):
+            for i in range(3):
+                should_visible = (i == 0) or (i == 1 and layout_id >= 2) or (i == 2 and layout_id == 3)
+                pw = self.plot_widgets[i]
+                if should_visible: pw.setVisible(True)
+                else:
+                    pw.setVisible(False)
+                    try: pw.getPlotItem().clear()
+                    except: pass
+                    self.plot_curves_dict[i].clear()
+                    if self.v_lines[i]: self.v_lines[i].setVisible(False)
+                    if self.h_lines[i]: self.h_lines[i].setVisible(False)
+                    if self.hover_dots[i]: self.hover_dots[i].setVisible(False)
+                    if self.hover_labels[i]: self.hover_labels[i].setVisible(False)
+        
+        container_height = self.plot_splitter.height() or 600
+        if layout_id == 1: self.plot_splitter.setSizes([container_height, 0, 0])
+        elif layout_id == 2:
+            h = container_height // 2
+            self.plot_splitter.setSizes([h, h, 0])
+        elif layout_id == 3:
+            h = container_height // 3
+            self.plot_splitter.setSizes([h, h, h])
+        QTimer.singleShot(100, self._reset_layout_switching_flag)
+
+    def _reset_layout_switching_flag(self):
+        self.layout_switching = False
+
+    def restore_layout_and_type_configs(self):
+        try:
+            layout_id = int(self.db.get_config("last_layout_id", "1"))
+            if layout_id == 1: self.rad_map1.setChecked(True)
+            elif layout_id == 2: self.rad_map2.setChecked(True)
+            elif layout_id == 3: self.rad_map3.setChecked(True)
+            self.handle_layout_changed(layout_id)
+            type_idx = int(self.db.get_config("last_input_type_idx", "7"))
+            if type_idx < self.input_type.count(): self.input_type.setCurrentIndex(type_idx)
+        except: pass
+
+    def load_history_from_db(self):
+        code = self.db.get_c_code()
+        if code: self.parser.parse_structs(code)
+        db_vars = self.db.get_all_vars()
+        for row in db_vars:
+            path, v_type, offset, base_var = row[0], row[1], row[2], row[3]
+            t_idx = row[4] if len(row) > 4 else 0
+            while self.tab_widget.count() <= t_idx: self.create_new_debug_tab()
+            if '.' not in path and '[' not in path: self.inject_var_to_tree_ui(path, v_type, t_idx)
+        for row in db_vars:
+            path, v_type, offset, base_var = row[0], row[1], row[2], row[3]
+            t_idx = row[4] if len(row) > 4 else 0
+            if '.' in path or '[' in path: self.inject_var_to_tree_ui(path, v_type, t_idx)
+
+    def handle_high_speed_data(self, batch_data):
+        locker = QMutexLocker(self.buffer_mutex)
+        for timestamp, data_packet in batch_data:
+            current_rel_time = (timestamp - self.start_time) * 1000.0
+            for ch_idx, val in data_packet.items():
+                self.ch_buffers[ch_idx].append(val)
+                self.ch_time_stamps[ch_idx].append(current_rel_time)
+        for i in range(3):
+            if len(self.ch_buffers[i]) > 40000:
+                self.ch_buffers[i] = self.ch_buffers[i][-25000:]
+                self.ch_time_stamps[i] = self.ch_time_stamps[i][-25000:]
+
+    def update_plot_canvas(self):
+        if self.is_frozen or self.layout_switching: return
+        layout_id = self.current_layout_id
+        locker = QMutexLocker(self.buffer_mutex)
+        for i in range(3):
+            active_paths = self.plot_active_paths[i]
+            curves_map = self.plot_curves_dict[i]
+            ch_idx = -1
+            for path in active_paths:
+                for c_i in range(3):
+                    if self.ch_paths[c_i] == path:
+                        ch_idx = c_i; break
+                if ch_idx != -1: break
+
+            pw = self.plot_widgets[i]
+            if i >= 1 and layout_id < 2: continue
+            if i == 2 and layout_id < 3: continue
+            if pw.isHidden() or not pw.isVisible() or pw.width() <= 20 or pw.height() <= 20: continue
+                
+            try:  
+                if not pw.getPlotItem().scene(): continue
+                if ch_idx != -1 and self.ch_time_stamps[ch_idx]:
+                    max_x = self.ch_time_stamps[ch_idx][-1]  
+                    min_x = max_x - self.max_display_duration_ms
+                    pw.setXRange(min_x, max_x, padding=0)
+                else:
+                    now_rel_time = (time.time() - self.start_time) * 1000.0
+                    min_x = now_rel_time - self.max_display_duration_ms
+                    pw.setXRange(min_x, now_rel_time, padding=0)
+                
+                curr_keys = list(curves_map.keys())
+                for pk in curr_keys:
+                    if pk not in active_paths and pk in curves_map:
+                        pw.removeItem(curves_map[pk])
+                        del curves_map[pk]
+                
+                for path in active_paths:
+                    target_ch = -1
+                    for c_i in range(3):
+                        if self.ch_paths[c_i] == path: target_ch = c_i; break
+                    if target_ch != -1 and self.ch_buffers[target_ch]:
+                        t_data = self.ch_time_stamps[target_ch]
+                        v_data = self.ch_buffers[target_ch]
+                        start_idx = bisect.bisect_left(t_data, min_x)
+                        if len(t_data) > start_idx:
+                            x_arr = np.array(t_data[start_idx:], dtype=np.float64)
+                            y_arr = np.array(v_data[start_idx:], dtype=np.float64)
+                            if path not in curves_map:
+                                smooth_pen = QPen(QColor(self.ch_colors[target_ch]), 2.0)
+                                smooth_pen.setCosmetic(True)
+                                smooth_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                                smooth_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                                curves_map[path] = pw.plot(pen=smooth_pen, antialias=True)
+                            curves_map[path].setData(x_arr, y_arr)
+            except: pass 
+
+    def handle_plot_mouse_move(self, pos, plot_idx):
+        if not self.is_frozen or self.layout_switching: return
+        pw = self.plot_widgets[plot_idx]
+        if pw.isHidden() or not pw.isVisible() or pw.width() <= 20 or pw.height() <= 20: return
+
+        active_paths = self.plot_active_paths[plot_idx]
+        target_ch = -1
+        for path in active_paths:
+            for c_i in range(3):
+                if self.ch_paths[c_i] == path: target_ch = c_i; break
+            if target_ch != -1: break
+
+        locker = QMutexLocker(self.buffer_mutex)
+        if target_ch == -1 or not self.ch_buffers[target_ch]: return
+        t_data = self.ch_time_stamps[target_ch]
+        v_data = self.ch_buffers[target_ch]
+
+        try:
+            if not pw.getPlotItem().scene(): return
+            mouse_point = pw.getViewBox().mapSceneToView(pos)
+            x_mouse = mouse_point.x()
+            idx = bisect.bisect_left(t_data, x_mouse)
+            if idx == 0: closest_idx = 0
+            elif idx >= len(t_data): closest_idx = len(t_data) - 1
+            else: closest_idx = idx if (t_data[idx] - x_mouse) < (x_mouse - t_data[idx-1]) else (idx - 1)
+
+            if closest_idx >= len(t_data): return
+            exact_x = t_data[closest_idx]
+            exact_y = v_data[closest_idx]
+
+            if self.v_lines[plot_idx]: self.v_lines[plot_idx].setPos(exact_x)
+            if self.h_lines[plot_idx]: self.h_lines[plot_idx].setPos(exact_y)
+            if self.v_lines[plot_idx]: self.v_lines[plot_idx].setVisible(True)
+            if self.h_lines[plot_idx]: self.h_lines[plot_idx].setVisible(True)
+
+            if self.hover_dots[plot_idx]:
+                self.hover_dots[plot_idx].setData([exact_x], [exact_y], brush=pg.mkBrush(self.ch_colors[target_ch]))
+                self.hover_dots[plot_idx].setVisible(True)
+
+            if self.hover_labels[plot_idx]:
+                self.hover_labels[plot_idx].setText(f" t: {exact_x:.1f} ms\n v: {exact_y:.4f} ")
+                self.hover_labels[plot_idx].setPos(exact_x, exact_y)
+                self.hover_labels[plot_idx].setVisible(True)
+        except: pass
+
+    def show_plot_context_menu(self, pos, plot_idx):
+        if self.layout_switching: return
+        available_paths = [p for p in self.ch_paths if p is not None]
+        pw = self.plot_widgets[plot_idx]
+        if pw.isHidden() or not pw.isVisible(): return
+        try:
+            menu = pw.getPlotItem().getContextMenus(None)
+            menu.setStyleSheet(POPUP_MENU_STYLE)
+            y_val_menu = None
+            for act in menu.actions():
+                if act.menu() and "Y_Val" in act.menu().title():
+                    y_val_menu = act.menu(); y_val_menu.clear(); break
+            if not y_val_menu:
+                y_val_menu = QMenu("📈 Y_Val 数据源定义", menu)
+                menu.insertMenu(menu.actions()[0] if menu.actions() else None, y_val_menu)
+            y_val_menu.setStyleSheet(POPUP_MENU_STYLE)
+            
+            if not available_paths:
+                action = QAction("⚠️ 暂无高速通道绑定的变量", y_val_menu)
+                action.setEnabled(False)
+                y_val_menu.addAction(action)
+            else:
+                for path in available_paths:
+                    is_selected = path in self.plot_active_paths[plot_idx]
+                    action = QAction(f"{'●   ' if is_selected else '○   '}{path}", y_val_menu)
+                    action.triggered.connect(lambda checked, p=path, p_idx=plot_idx, current_state=is_selected: 
+                        self.commit_vofa_layer_selection(p, p_idx, current_state))
+                    y_val_menu.addAction(action)
+            menu.exec(pw.mapToGlobal(pos))
+        except: pass
+
+    def commit_vofa_layer_selection(self, path, plot_idx, current_state):
+        if not current_state:
+            if path not in self.plot_active_paths[plot_idx]: self.plot_active_paths[plot_idx].append(path)
+        else:
+            if path in self.plot_active_paths[plot_idx]: self.plot_active_paths[plot_idx].remove(path)
+        self.restart_sampling_thread()
+
+    def show_context_menu(self, pos):
+        tree = self.get_current_tree()
+        if not tree: return
+        item = tree.itemAt(pos)
+        if not item: return
+            
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if not path: path = item.text(0)
+        
+        menu = QMenu()
+        menu.setStyleSheet(POPUP_MENU_STYLE)
+        bound_ch_idx = -1
+        for i in range(3):
+            if self.ch_paths[i] == path: bound_ch_idx = i; break
+
+        is_container = "{结构体/数组}" in item.text(2)
+        if not is_container:
+            if bound_ch_idx != -1:
+                menu.addAction(f"❌ 取消该变量在 通道 {bound_ch_idx+1} 的波形监视")
+            else:
+                m1 = menu.addAction("🟢 绑定至 示波器通道 1")
+                m2 = menu.addAction("🟡 绑定至 示波器通道 2")
+                m3 = menu.addAction("🔵 绑定至 示波器通道 3")
+            menu.addSeparator()
+            
+        m_del = menu.addAction("🗑️ 从监视列表中删除该整组变量及其全部子成员 (Delete)")
+        act = menu.exec(tree.viewport().mapToGlobal(pos))
+        
+        if not is_container and bound_ch_idx != -1 and act and "取消" in act.text(): 
+            self.unbind_channel(bound_ch_idx)
+        elif not is_container and 'm1' in locals() and act == m1: self.bind_tree_item_to_channel(0, item)
+        elif not is_container and 'm2' in locals() and act == m2: self.bind_tree_item_to_channel(1, item)
+        elif not is_container and 'm3' in locals() and act == m3: self.bind_tree_item_to_channel(2, item)
+        elif act == m_del:
+            root_item = item
+            while root_item.parent(): root_item = root_item.parent()
+            self.remove_variable_root(root_item)
+
+    def bind_tree_item_to_channel(self, ch_idx, item):
+        path = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
+        v_type = item.text(1)
+        all_db_vars = {x[0]: (x[2], x[3]) for x in self.db.get_all_vars()}
+        if path not in all_db_vars: return
+        offset, base_var = all_db_vars[path]
+        
+        if base_var.startswith("0x") or base_var.startswith("0X"):
+            absolute_address = int(base_var, 16) + offset
+        else:
+            base_addr = self.symbol_cache.get(base_var)
+            if base_addr is None: return
+            absolute_address = base_addr + offset
+        
+        for i in range(3):
+            if self.ch_paths[i] == path: self.unbind_channel(i)
+        
+        locker = QMutexLocker(self.buffer_mutex)
+        self.ch_paths[ch_idx] = path
+        self.ch_types[ch_idx] = v_type
+        self.ch_addrs[ch_idx] = hex(absolute_address)
+        self.ch_buffers[ch_idx] = []
+        self.ch_time_stamps[ch_idx] = []
+        if path not in self.plot_active_paths[ch_idx]: self.plot_active_paths[ch_idx].append(path)
+        
+        self.refresh_ui_channel_bar()
+        self.restart_sampling_thread()
+
+    def unbind_channel(self, ch_idx):
+        locker = QMutexLocker(self.buffer_mutex)
+        path = self.ch_paths[ch_idx]
+        if path:
+            for p_idx, p_active in enumerate(self.plot_active_paths):
+                if path in p_active: p_active.remove(path)
+                if path in self.plot_curves_dict[p_idx]:
+                    try:
+                        self.plot_widgets[p_idx].removeItem(self.plot_curves_dict[p_idx][path])
+                        del self.plot_curves_dict[p_idx][path]
+                    except: pass
+        self.ch_paths[ch_idx] = None
+        self.ch_types[ch_idx] = None
+        self.ch_addrs[ch_idx] = None
+        self.ch_buffers[ch_idx] = []
+        self.ch_time_stamps[ch_idx] = []
+        self.refresh_ui_channel_bar()
+        self.restart_sampling_thread()
+
+    def refresh_ui_channel_bar(self):
+        labels = [self.lbl_ch1, self.lbl_ch2, self.lbl_ch3]
+        for i in range(3):
+            labels[i].setText(f"CH{i+1}: {self.ch_paths[i]} 🔄" if self.ch_paths[i] else f"CH{i+1}: 📭 空闲")
+
+    def quick_add_variable(self):
+        name = self.input_name.text().strip()
+        v_type = self.input_type.currentText()
+        if not name: return
+        current_tab_idx = self.tab_widget.currentIndex()
+        if current_tab_idx < 0: return
+
+        if name.startswith("0x") or name.startswith("0X"):
+            self.db.save_var(name, v_type, 0, name, current_tab_idx)
+            self.inject_var_to_tree_ui(name, v_type, current_tab_idx)
+            self.input_name.clear(); return
+
+        if name not in self.symbol_cache:
+            QMessageBox.warning(self, "提示", f"符号名 '{name}' 未在 ELF 中检索到。")
+            return
+        
+        self.db.save_var(name, v_type, 0, name, current_tab_idx)
+        self.inject_var_to_tree_ui(name, v_type, current_tab_idx)
+        self.input_name.clear()
+
+    def open_advance_parser_window(self):
+        current_tab_idx = self.tab_widget.currentIndex()
+        if current_tab_idx < 0: return
+        if not hasattr(self, 'adv_parse_dialog') or self.adv_parse_dialog is None:
+            self.adv_parse_dialog = AdvancedWorkspaceDialog(self.db, self.parser, symbol_cache=self.symbol_cache, parent=self)
+            self.adv_parse_dialog.symbol_selected_signal.connect(self.process_injected_symbol_from_workspace)
+        self.adv_parse_dialog.show()
+        self.adv_parse_dialog.raise_()
+        self.adv_parse_dialog.activateWindow()
+
+    def process_injected_symbol_from_workspace(self, path, v_type, offset):
+        """⚡【核心重构修复点】：无视嵌套还是原生数组，均触发全量打散逻辑，彻底激发出树状组件的箭头"""
+        current_tab_idx = self.tab_widget.currentIndex()
+        if current_tab_idx < 0: return
+        
+        base_var = path.split('.')[0].split('[')[0]
+        self.db.save_var(path, v_type, offset, base_var, current_tab_idx)
+        
+        # 💡 这里直接传入 base_var 的原貌去推演
+        count_val = 1
+        arr_match = re.search(r'\[(\d+)\]', v_type)
+        pure_type = v_type
+        if arr_match:
+            count_val = int(arr_match.group(1))
+            pure_type = re.sub(r'\[.*?\]', '', v_type).strip()
+
+        flat_items = self.parser.flatten_variable({"name": base_var, "type": pure_type, "count": count_val})
+        for fi in flat_items:
+            self.db.save_var(fi["path"], fi["type"], fi["offset"], base_var, current_tab_idx)
+
+        # 级联注入树
+        self.inject_var_to_tree_ui(path, v_type, current_tab_idx)
+        all_db_vars = self.db.get_all_vars()
+        for row in all_db_vars:
+            h_path, h_type, _, _, t_idx = row[0], row[1], row[2], row[3], row[4] if len(row)>4 else 0
+            if t_idx == current_tab_idx and (h_path.startswith(path + ".") or h_path.startswith(path + "[")):
+                self.inject_var_to_tree_ui(h_path, h_type, current_tab_idx)
+        print(f"⚡ 成功无缝添加扁平化级联变量链：{path}")
+
+    def handle_tree_item_double_clicked(self, item, column):
+        if column != 2: return
+        val_text = item.text(2)
+        v_type = item.text(1)
+        path = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
+        
+        if "{结构体/数组}" in val_text or "断开" in val_text or "异常" in val_text: return
+        if v_type in self.parser.structs or v_type == "struct/array": return
+
+        all_db_paths = [x[0] for x in self.db.get_all_vars()]
+        has_children = any(p.startswith(path + ".") or p.startswith(path + "[") for p in all_db_paths if p != path)
+        if has_children: return
+        
+        tree = self.get_current_tree()
+        editor = InPlaceEditLineEdit(tree, val_text, v_type)
+        tree.setItemWidget(item, column, editor)
+        editor.setFocus()
+        editor.editing_finished_signal.connect(lambda text: self.finish_tree_item_editing(item, column, text))
+
+    def finish_tree_item_editing(self, item, column, new_text):
+        tree = self.get_current_tree()
+        if tree: tree.removeItemWidget(item, column)
+        if not new_text: return 
+        
+        path = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
+        v_type = item.text(1)
+        all_db_vars = {x[0]: (x[2], x[3]) for x in self.db.get_all_vars()}
+        if path not in all_db_vars: return
+        offset, base_var = all_db_vars[path]
+        
+        if base_var.startswith("0x") or base_var.startswith("0X"):
+            addr_hex = hex(int(base_var, 16) + offset)
+        else:
+            base_addr = self.symbol_cache.get(base_var)
+            if base_addr is None: return
+            addr_hex = hex(base_addr + offset)
+            
+        norm_type = v_type.replace("_t", "").strip()
+        width = 1 if "int8" in norm_type or "char" in norm_type else (2 if "int16" in norm_type else 4)
+        
+        try:
+            if "float" in norm_type:
+                raw_int = struct.unpack('<I', struct.pack('<f', float(new_text)))[0]
+                self.send_write_command(addr_hex, raw_int, 4, is_float=True)
+            else:
+                self.send_write_command(addr_hex, int(float(new_text)), width)
+            item.setText(2, new_text)
+        except: pass
+
+    def remove_variable_root(self, root_item):
+        current_tab_idx = self.tab_widget.currentIndex()
+        root_name = root_item.text(0)
+        for path, _, _, _, t_idx in self.db.get_all_vars():
+            # 💡 【完美修复】：彻底移除掉混入的 nudge 噪声单词，恢复纯净的逻辑判断
+            if t_idx == current_tab_idx and (path == root_name or path.startswith(root_name + ".") or path.startswith(root_name + "[")):
+                self.db.delete_var(path, current_tab_idx)
+                for i in range(3):
+                    if self.ch_paths[i] == path: self.unbind_channel(i)
+                        
+        tree = self.get_current_tree()
+        if tree:
+            index = tree.indexOfTopLevelItem(root_item)
+            if index >= 0: tree.takeTopLevelItem(index)
+        self.restart_sampling_thread()
+        
+    def restart_sampling_thread(self):
+        if hasattr(self, 'worker') and self.worker:
+            self.worker.stop(); self.worker = None
+            
+        hz_idx = self.wave_hz_combo.currentIndex()
+        if hz_idx == 0:
+            try: hz = int(self.custom_hz_edit.text().strip())
+            except: hz = 300
+        else: hz = [300, 500, 1000, 2000, 4000, 8000][hz_idx]
+            
+        self.custom_hz_edit.setEnabled(hz_idx == 0)
+        delay = 1.0 / hz
+        active_channels = {}
+        for i in range(3):
+            if self.ch_addrs[i]: active_channels[i] = (self.ch_addrs[i], self.ch_types[i], self.ch_paths[i])
+        if active_channels:
+            self.worker = HighSpeedSamplingWorker(self.config, active_channels, delay, self.jlink_native_instance)
+            self.worker.data_received.connect(self.handle_high_speed_data)
+            self.worker.start()
+
+    def low_speed_tree_refresh(self):
+        if self.layout_switching: return
+        all_db_vars = {x[0]: (x[2], x[3], x[4] if len(x)>4 else 0) for x in self.db.get_all_vars()}
+        labels = [self.lbl_ch1, self.lbl_ch2, self.lbl_ch3]
+        locker = QMutexLocker(self.buffer_mutex)
+        
+        for i in range(3):
+            if self.ch_paths[i]:
+                labels[i].setText(f"CH{i+1}: {self.ch_buffers[i][-1]:.2f}" if (self.ch_buffers[i] and (self.config.backend_mode == "JLINK" or self.openocd_link_alive)) else f"CH{i+1}: 断开")
+            else: labels[i].setText(f"CH{i+1}: 📭 空闲")
+
+        def refresh_item(item, t_idx):
+            tree = self.tab_widget.widget(t_idx)
+            if not tree or tree.itemWidget(item, 2) is not None: return
+
+            path = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
+            v_type = item.text(1)
+            if "{结构体/数组}" in item.text(2):
+                for idx in range(item.childCount()): refresh_item(item.child(idx), t_idx)
+                return
+                
+            for i in range(3):
+                if self.ch_paths[i] == path:
+                    if self.config.backend_mode == "OPENOCD" and not self.openocd_link_alive: item.setText(2, "断开")
+                    else: item.setText(2, f"{self.ch_buffers[i][-1]:.4f}" if self.ch_buffers[i] else "载入中")
+                    return
+            
+            if path not in all_db_vars: return
+            offset, base_var, _ = all_db_vars[path]
+            if base_var.startswith("0x") or base_var.startswith("0X"): absolute_address = int(base_var, 16) + offset
+            else:
+                base_addr = self.symbol_cache.get(base_var)
+                if base_addr is None: return
+                absolute_address = base_addr + offset
+            
+            norm_type = v_type.strip()
+            is_custom_enum = (norm_type in self.parser.enums or norm_type.replace("_t", "") in self.parser.enums)
+            
+            try:
+                width_bytes = 1 if "int8" in norm_type or "char" in norm_type else (2 if "int16" in norm_type else 4)
+                if self.config.backend_mode == "OPENOCD":
+                    if not self.openocd_link_alive: raise Exception()
+                    cmd = "mdb" if width_bytes == 1 else ("mdh" if width_bytes == 2 else "mdw")
+                    res = self.send_tcl_cmd(f"{cmd} {hex(absolute_address)}")
+                    if "ERROR" in res or ":" not in res: raise Exception()
+                    raw_int = int(res.split(":")[-1].strip(), 16)
+                else:
+                    if not self.jlink_native_instance or not self.jlink_native_instance.target_connected(): raise Exception()
+                    if width_bytes == 1: raw_int = self.jlink_native_instance.memory_read8(absolute_address, 1)[0]
+                    elif width_bytes == 2: raw_int = self.jlink_native_instance.memory_read16(absolute_address, 1)[0]
+                    else: raw_int = self.jlink_native_instance.memory_read32(absolute_address, 1)[0]
+                
+                if "uint8" in norm_type: v = raw_int & 0xFF
+                elif "int8" in norm_type or "char" in norm_type: v = struct.unpack('<b', struct.pack('<B', raw_int & 0xFF))[0]
+                elif "uint16" in norm_type: v = raw_int & 0xFFFF
+                elif "int16" in norm_type: v = struct.unpack('<h', struct.pack('<H', raw_int & 0xFFFF))[0]
+                elif "uint32" in norm_type: v = raw_int & 0xFFFFFFFF
+                elif "float" in norm_type: v = struct.unpack('<f', struct.pack('<I', raw_int & 0xFFFFFFFF))[0]
+                elif is_custom_enum: v = raw_int & 0xFF
+                else: v = struct.unpack('<i', struct.pack('<I', raw_int & 0xFFFFFFFF))[0]
+                item.setText(2, f"{v:.4f}" if "float" in norm_type else str(v))
+            except: item.setText(2, "断开")
+            for idx in range(item.childCount()): refresh_item(item.child(idx), t_idx)
+
+        for tab_i in range(self.tab_widget.count()):
+            tree = self.tab_widget.widget(tab_i)
+            if tree:
+                for i in range(tree.topLevelItemCount()): refresh_item(tree.topLevelItem(i), tab_i)
+
+    def inject_var_to_tree_ui(self, path, v_type, tab_idx):
+        tree = self.tab_widget.widget(tab_idx)
+        if not tree: return
+        parts = re.findall(r'^[a-zA-Z_]\w*|\.[a-zA-Z_]\w*|\[\d+\]', path)
+        if not parts: return
+        current_parent = None
+        current_path_accumulator = ""
+
+        for i, part in enumerate(parts):
+            current_path_accumulator += part
+            display_name = part.lstrip('.')  
+            found_child = None
+            if current_parent is None:
+                for idx in range(tree.topLevelItemCount()):
+                    if tree.topLevelItem(idx).text(0) == display_name:
+                        found_child = tree.topLevelItem(idx); break
+            else:
+                for idx in range(current_parent.childCount()):
+                    if current_parent.child(idx).text(0) == display_name:
+                        found_child = current_parent.child(idx); break
+
+            if not found_child:
+                child_type = "{未知}"
+                for h_path, h_type, _, _, h_t_idx in self.db.get_all_vars():
+                    if h_t_idx == tab_idx and h_path == current_path_accumulator:
+                        child_type = h_type; break
+                if child_type == "{未知}" and i < len(parts) - 1: child_type = "struct/array"
+
+                is_container = (child_type in self.parser.structs or 
+                                ("[" in child_type and not re.search(r'\[\d+\]$', current_path_accumulator)) or 
+                                i < len(parts) - 1 or 
+                                child_type == "struct/array")
+                val_display = "{结构体/数组}" if is_container else "读取中..."
+                new_item = QTreeWidgetItem([display_name, child_type, val_display])
+                new_item.setData(0, Qt.ItemDataRole.UserRole, current_path_accumulator)
+                
+                if current_parent is None: tree.addTopLevelItem(new_item)
+                else: current_parent.addChild(new_node if 'new_node' in locals() else new_item)
+                found_child = new_item
+            current_parent = found_child
+
+    def update_hardware_heartbeat(self):
+        is_alive = False
+        if self.config.backend_mode == "OPENOCD":
+            worker_alive = hasattr(self, 'worker') and self.worker and self.worker.isRunning() and self.worker.is_link_alive
+            is_alive = worker_alive and self.openocd_link_alive
+        else: is_alive = True if (self.jlink_native_instance and self.jlink_native_instance.target_connected()) else False
+
+        if is_alive:
+            self.heartbeat_state = not self.heartbeat_state
+            self.lbl_led.setStyleSheet(f"background-color: {'#00E676' if self.heartbeat_state else '#00b252'}; border-radius: 5px;")
+            self.lbl_status_text.setText(f"调试在线 ({self.config.backend_mode})")
+            self.lbl_status_text.setStyleSheet("color: #00E676; font-family: 'Microsoft YaHei'; font-size: 11px; font-weight: bold;")
+        else:
+            self.lbl_led.setStyleSheet("background-color: #d32f2f; border-radius: 5px;")
+            self.lbl_status_text.setText("链路断开")
+            self.lbl_status_text.setStyleSheet("color: #d32f2f; font-family: 'Microsoft YaHei'; font-size: 11px; font-weight: bold;")
+
+    def closeEvent(self, event):
+        if hasattr(self, 'worker') and self.worker: self.worker.stop()
+        if self.tcl_socket:
+            try: self.tcl_socket.close()
+            except: pass
+        if self.jlink_native_instance:
+            try: self.jlink_native_instance.close()
+            except: pass
+        event.accept()
+
+
+class HighSpeedSamplingWorker(QThread):
+    data_received = pyqtSignal(list)
+
+    def __init__(self, config, active_channels, sample_delay, jlink_instance=None):
+        super().__init__()
+        self.config = config
+        self.channels = active_channels 
+        self.sample_delay = sample_delay
+        self.jlink = jlink_instance
+        self.running = True
+        self.is_link_alive = False  
+
+    def run(self):
+        s = None
+        parsed_channels = []
+        for ch_idx, (addr_hex, v_type, path) in self.channels.items():
+            addr_int = int(addr_hex, 16)
+            norm_type = v_type.replace("_t", "").strip().lower()
+            width = 1 if "int8" in norm_type or "char" in norm_type else (2 if "int16" in norm_type else 4)
+            parsed_channels.append({
+                'ch_idx': ch_idx, 'addr': addr_int, 'width': width, 
+                'is_float': "float" in norm_type, 'is_signed': "int" in norm_type and "uint" not in norm_type
+            })
+
+        if self.config.backend_mode == "OPENOCD":
+            if not parsed_channels:
+                use_block_read = False
+                merged_cmd_bytes = b""
+            else:
+                addrs = [c['addr'] for c in parsed_channels]
+                block_start, block_end = min(addrs) & ~0x3, (max(addrs) + 7) & ~0x3
+                word_count = (block_end - block_start) // 4
+                use_block_read = (block_end - block_start) <= 128 and len(parsed_channels) > 1
+                merged_cmd = f"mdw {hex(block_start)} {word_count}\x1a" if use_block_read else " ; ".join([f"{'mdb' if c['width']==1 else ('mdh' if c['width']==2 else 'mdw')} {hex(c['addr'])}" for c in parsed_channels]) + "\x1a"
+                merged_cmd_bytes = merged_cmd.encode('utf-8')
+
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                s.settimeout(0.3)
+                s.connect((self.config.openocd_host, self.config.tcl_port))
+                self.is_link_alive = True
+            except: self.is_link_alive = False
+
+        local_batch = []
+        last_flush_time = time.time()
+
+        while self.running:
+            t_now = time.time()
+            packet = {}
+            if self.config.backend_mode == "OPENOCD":
+                if not merged_cmd_bytes or not self.is_link_alive:
+                    time.sleep(0.04); continue
+                try:
+                    s.sendall(merged_cmd_bytes)
+                    res = s.recv(2048).decode('utf-8').replace('\x1a', '').strip()
+                    if "ERROR" in res: raise Exception()
+                    lines = [l.strip() for l in res.split('\n') if l.strip()]
+                    
+                    if use_block_read:
+                        words = []
+                        for line in lines:
+                            if ":" in line: words.extend([int(x, 16) for x in line.split(":")[-1].strip().split()])
+                        for c in parsed_channels:
+                            idx = (c['addr'] - block_start) // 4
+                            shift = ((c['addr'] - block_start) % 4) * 8
+                            if idx < len(words):
+                                raw_val = (words[idx] >> shift) & ((1 << (c['width']*8)) - 1)
+                                packet[c['ch_idx']] = struct.unpack('<f', struct.pack('<I', raw_val))[0] if c['is_float'] else float(raw_val - 256 if c['is_signed'] and c['width']==1 and raw_val>=128 else (raw_val - 65536 if c['is_signed'] and c['width']==2 and raw_val>=32768 else raw_val))
+                    else:
+                        for i, c in enumerate(parsed_channels):
+                            if i < len(lines):
+                                raw_int = int(lines[i].split(":")[-1].strip(), 16)
+                                packet[c['ch_idx']] = struct.unpack('<f', struct.pack('<I', raw_int))[0] if c['is_float'] else float(raw_int)
+                except: 
+                    self.is_link_alive = False; continue
+            else:
+                if self.jlink and self.jlink.target_connected():
+                    try:
+                        for c in parsed_channels:
+                            if c['width'] == 1: raw = self.jlink.memory_read8(c['addr'], 1)[0]
+                            elif c['width'] == 2: raw = self.jlink.memory_read16(c['addr'], 1)[0]
+                            else: raw = self.jlink.memory_read32(c['addr'], 1)[0]
+                            packet[c['ch_idx']] = struct.unpack('<f', struct.pack('<I', raw))[0] if c['is_float'] else float(raw)
+                    except: 
+                        time.sleep(0.04); continue
+                else:
+                    time.sleep(0.04); continue
+
+            if packet: local_batch.append((t_now, packet))
+            if len(local_batch) >= 20 or (t_now - last_flush_time > 0.025):
+                if self.running and local_batch: self.data_received.emit(local_batch)
+                local_batch, last_flush_time = [], t_now
+            if self.sample_delay > 0: time.sleep(self.sample_delay)
+
+        if s: 
+            try: s.close()
+            except: pass
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setStyleSheet(DARK_STYLE)
+    db = LiveWatchDB()
+    dlg = LoginConfigDialog(db)
+    if dlg.exec() == QDialog.DialogCode.Accepted and dlg.is_connected:
+        win = MCUStudioWindow(dlg.config, db)
+        win.show()
+        sys.exit(app.exec())
+</file>
+
+</files>

@@ -23,12 +23,11 @@ from PyQt6.QtGui import QFont, QKeyEvent, QIntValidator, QDoubleValidator, QColo
 
 import pyqtgraph as pg
 
-# 💡 彻底关闭不稳定的 OpenGL 硬件级加速，全局开启抗锯齿
-# 经过实测，基于 NumPy 矢量切片的原生绘图在现代 CPU 上足以轻松吃满 8K 采样，且彻底免疫上下文死锁。
 pg.setConfigOptions(useOpenGL=False, antialias=True)
 
-from struct_parser import StructParser
-from extract_param import AdvancedWorkspaceDialog
+# 💡 完美闭环合并：从同级目录下的 extract_param 中直接引入对齐解析机
+from extract_param import InnerStructParser, AdvancedWorkspaceDialog
+
 try:
     import pylink
 except ImportError:
@@ -249,7 +248,6 @@ class LoginConfigDialog(QDialog):
 
     def toggle_engine_fields(self):
         is_jlink = (self.driver_mode_combo.currentIndex() == 0)
-        
         self.jlink_dir_edit.setEnabled(is_jlink)
         self.btn_jl_dir.setEnabled(is_jlink)
         self.jlink_device_edit.setEnabled(is_jlink)
@@ -263,7 +261,6 @@ class LoginConfigDialog(QDialog):
         self.target_combo.setEnabled(not is_jlink)
         self.btn_browse_target.setEnabled(not is_jlink)
         self.log_checkbox.setEnabled(not is_jlink)
-        
         self.static_env_check()
 
     def static_env_check(self):
@@ -273,12 +270,12 @@ class LoginConfigDialog(QDialog):
                 self.lbl_hardware_status.setText("❌ 未检测到 pylink 库，请执行 pip install pylink-square")
                 self.lbl_hardware_status.setStyleSheet("color: #e53935; font-weight: bold;")
             else:
-                self.lbl_hardware_status.setText("🟢 J-Link 原生运行环境就绪。连接和退出时绝不复位 MCU。")
+                self.lbl_hardware_status.setText("🟢 J-Link 原生运行环境就绪。")
                 self.lbl_hardware_status.setStyleSheet("color: #00E676; font-weight: bold;")
         else:
             exe = self.openocd_edit.text().strip()
             if exe and os.path.exists(exe):
-                self.lbl_hardware_status.setText("🟡 OpenOCD 工具路径就绪。通信管道将独立平稳工作。")
+                self.lbl_hardware_status.setText("🟡 OpenOCD 工具路径就绪。")
                 self.lbl_hardware_status.setStyleSheet("color: #00E5FF; font-weight: bold;")
             else:
                 self.lbl_hardware_status.setText("⚠️ OpenOCD 路径待完善，可直接进入面板。")
@@ -353,12 +350,10 @@ class LoginConfigDialog(QDialog):
                     si.wShowWindow = subprocess.SW_HIDE
                 subprocess.Popen(cmd, startupinfo=si, creationflags=subprocess.CREATE_NEW_CONSOLE)
                 time.sleep(0.5)
-            
         else: 
             self.config.jlink_dll_dir = self.jlink_dir_edit.text().strip()
             self.config.jlink_device = self.jlink_device_edit.text().strip()
             self.config.svd_path = self.svd_edit.text().strip()
-
             self.db.save_config("jlink_dll_dir", self.config.jlink_dll_dir)
             self.db.save_config("jlink_device", self.config.jlink_device)
             self.db.save_config("svd_path", self.config.svd_path)
@@ -434,7 +429,7 @@ class MCUStudioWindow(QMainWindow):
         self.setWindowTitle(f"MCU Live Watch Studio - [{'原生J-Link独占' if config.backend_mode=='JLINK' else 'OpenOCD驱动'}]")
         self.resize(1450, 850)
         
-        self.parser = StructParser()
+        self.parser = InnerStructParser()
         self.symbol_cache = {}
         self.worker = None 
         self.jlink_native_instance = None 
@@ -446,10 +441,7 @@ class MCUStudioWindow(QMainWindow):
         self.ch_buffers = [[], [], []]         
         self.ch_time_stamps = [[], [], []]     
         
-        # 数据流级高频物理互斥锁
         self.buffer_mutex = QMutex()
-        
-        # 布局切换旗标响应
         self.layout_switching = False
         self.current_layout_id = 1
         
@@ -619,7 +611,6 @@ class MCUStudioWindow(QMainWindow):
         top.addWidget(self.custom_hz_edit)
         top.addWidget(self.btn_freeze)
         
-        # 💡 修复：将之前挤在一行的多条布局打包语句拆分换行，修复 Python 语法错误
         top.addSpacing(10) 
         top.addWidget(self.btn_reconnect) 
         top.addWidget(self.btn_mcu_reset) 
@@ -638,7 +629,6 @@ class MCUStudioWindow(QMainWindow):
         top.addWidget(self.rad_map2)
         top.addWidget(self.rad_map3)
         self.layout_group.idClicked.connect(self.handle_layout_changed)
-        
         layout.addLayout(top)
 
         quick_input_bar = QHBoxLayout()
@@ -668,7 +658,6 @@ class MCUStudioWindow(QMainWindow):
         layout.addLayout(quick_input_bar)
         
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        
         self.tab_widget = QTabWidget()
         self.tab_widget.setTabsClosable(True)
         self.tab_widget.tabCloseRequested.connect(self.handle_tab_close_requested)
@@ -681,7 +670,6 @@ class MCUStudioWindow(QMainWindow):
         self.tab_widget.setCornerWidget(self.btn_add_tab, Qt.Corner.TopRightCorner)
         
         self.create_new_debug_tab("主调试窗口")
-        
         self.main_splitter.addWidget(self.tab_widget)
         
         self.plot_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -689,20 +677,17 @@ class MCUStudioWindow(QMainWindow):
         
         self.plot_widgets = []
         self.ch_colors = ['#00E676', '#FFD600', '#00E5FF'] 
-
         self.v_lines = []
         self.h_lines = []
         self.hover_dots = []
         self.hover_labels = []
 
-        # 初始化固定的 3 个画布静态骨架
         for i in range(3):
             pw = pg.PlotWidget()
             pw.setBackground('#111111')
             pw.showGrid(x=True, y=True, alpha=0.2)
             pw.setLabel('bottom', '时间滚动追踪轴', units='ms')
             pw.getViewBox().setDefaultPadding(0.0)
-            
             pw.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             pw.customContextMenuRequested.connect(lambda pos, idx=i: self.show_plot_context_menu(pos, idx))
 
@@ -724,7 +709,6 @@ class MCUStudioWindow(QMainWindow):
             hover_label.setVisible(False)
             pw.addItem(hover_label)
             self.hover_labels.append(hover_label)
-
             pw.scene().sigMouseMoved.connect(lambda pos, idx=i: self.handle_plot_mouse_move(pos, idx))
 
             self.plot_widgets.append(pw)
@@ -736,7 +720,6 @@ class MCUStudioWindow(QMainWindow):
         
         bottom_bar = QHBoxLayout()
         bottom_bar.setContentsMargins(5, 4, 5, 4)
-        
         self.lbl_ch1 = QLabel("CH1: 📭 空闲")
         self.lbl_ch2 = QLabel("CH2: 📭 空闲")
         self.lbl_ch3 = QLabel("CH3: 📭 空闲")
@@ -766,17 +749,13 @@ class MCUStudioWindow(QMainWindow):
         layout.addWidget(bottom_wrapper)
         
         main_widget.setLayout(layout)
-        self.centralWidget = main_widget
-        self. CentralWidget = main_widget
         self.setCentralWidget(main_widget)
 
     def create_new_debug_tab(self, name=None):
         if self.tab_widget.count() >= 2:
-            QMessageBox.warning(self, "标签页上限", "为了保障运行渲染流畅度，最多只允许开启 2 个变量调试窗口。")
+            QMessageBox.warning(self, "标签页上限", "最多只允许开启 2 个变量调试窗口。")
             return
-            
-        if not name:
-            name = f"窗口 {self.tab_widget.count() + 1}"
+        if not name: name = f"窗口 {self.tab_widget.count() + 1}"
             
         tree = QTreeWidget()
         tree.setColumnCount(3)
@@ -788,15 +767,12 @@ class MCUStudioWindow(QMainWindow):
         
         new_idx = self.tab_widget.addTab(tree, name)
         self.tab_widget.setCurrentIndex(new_idx)
-        
-        if self.tab_widget.count() >= 2:
-            self.btn_add_tab.setEnabled(False)
+        if self.tab_widget.count() >= 2: self.btn_add_tab.setEnabled(False)
 
     def handle_tab_close_requested(self, index):
         if self.tab_widget.count() <= 1:
             QMessageBox.warning(self, "禁止关闭", "至少需要保留一个正在执行的变量调试主窗口。")
             return
-            
         tree = self.tab_widget.widget(index)
         for i in range(tree.topLevelItemCount()):
             item = tree.topLevelItem(i)
@@ -804,10 +780,7 @@ class MCUStudioWindow(QMainWindow):
             for path, _, _, _, t_idx in self.db.get_all_vars():
                 if t_idx == index and (path == root_name or path.startswith(root_name + ".") or path.startswith(root_name + "[")):
                     self.db.delete_var(path, tab_idx=t_idx)
-                    
-        for i in range(3):
-            self.unbind_channel(i)
-            
+        for i in range(3): self.unbind_channel(i)
         self.tab_widget.removeTab(index)
         self.btn_add_tab.setEnabled(True)
         self.restart_sampling_thread()
@@ -827,10 +800,7 @@ class MCUStudioWindow(QMainWindow):
                 if self.hover_labels[i]: self.hover_labels[i].setVisible(False)
 
     def trigger_manual_mcu_reset(self):
-        # 1. 触发按钮闪烁动画
         self._execute_flash_animation(self.btn_mcu_reset, "#e53935", "color: #ff8a80;")
-        
-        # 2. 执行底层硬件复位信号下发
         if self.config.backend_mode == "OPENOCD":
             if self.openocd_link_alive and self.tcl_socket:
                 try:
@@ -838,20 +808,11 @@ class MCUStudioWindow(QMainWindow):
                     self.tcl_socket.sendall(b"reset run\x1a")
                     try: self.tcl_socket.recv(512)
                     except: pass
-                    print("♻️ MCU 硬件强制复位信号已下发...")
-                except:
-                    pass
+                except: pass
         else:
             if self.jlink_native_instance and self.jlink_native_instance.target_connected(): 
-                try: 
-                    self.jlink_native_instance.reset()
-                    print("♻️ J-Link 原生内核复位信号已下发...")
-                except: 
-                    pass
-
-        # 3. 核心改进：复位完紧接着自动调用现有的“重启通信后端”逻辑
-        # 这样既能实现一键复位+重连，同时原有的“重启通信”按钮依然独立有效
-        print("⚡ 正在自动重开通信管道...")
+                try: self.jlink_native_instance.reset()
+                except: pass
         self.force_reconnect_engine()
 
     def force_reconnect_engine(self):
@@ -868,7 +829,6 @@ class MCUStudioWindow(QMainWindow):
             cmd = [self.config.openocd_exe] + self.config.get_openocd_args()
             subprocess.Popen(cmd, startupinfo=subprocess.STARTINFO(), creationflags=subprocess.CREATE_NEW_CONSOLE)
             time.sleep(0.6)
-        
         self.init_global_link_backend()
         self.restart_sampling_thread()
 
@@ -885,21 +845,15 @@ class MCUStudioWindow(QMainWindow):
         self.current_layout_id = layout_id
         self.db.save_config("last_layout_id", str(layout_id))
         
-        # 💡 核心强化清理防御圈
         with QMutexLocker(self.buffer_mutex):
             for i in range(3):
                 should_visible = (i == 0) or (i == 1 and layout_id >= 2) or (i == 2 and layout_id == 3)
                 pw = self.plot_widgets[i]
-                
-                if should_visible:
-                    pw.setVisible(True)
+                if should_visible: pw.setVisible(True)
                 else:
                     pw.setVisible(False)
-                    # 💡 修正：只针对单路具体的画布清除，防止解绑不存在的信号引发 TypeError 闪退
-                    try:
-                        pw.getPlotItem().clear()
-                    except:
-                        pass
+                    try: pw.getPlotItem().clear()
+                    except: pass
                     self.plot_curves_dict[i].clear()
                     if self.v_lines[i]: self.v_lines[i].setVisible(False)
                     if self.h_lines[i]: self.h_lines[i].setVisible(False)
@@ -907,15 +861,13 @@ class MCUStudioWindow(QMainWindow):
                     if self.hover_labels[i]: self.hover_labels[i].setVisible(False)
         
         container_height = self.plot_splitter.height() or 600
-        if layout_id == 1:
-            self.plot_splitter.setSizes([container_height, 0, 0])
+        if layout_id == 1: self.plot_splitter.setSizes([container_height, 0, 0])
         elif layout_id == 2:
             h = container_height // 2
             self.plot_splitter.setSizes([h, h, 0])
         elif layout_id == 3:
             h = container_height // 3
             self.plot_splitter.setSizes([h, h, h])
-
         QTimer.singleShot(100, self._reset_layout_switching_flag)
 
     def _reset_layout_switching_flag(self):
@@ -928,35 +880,23 @@ class MCUStudioWindow(QMainWindow):
             elif layout_id == 2: self.rad_map2.setChecked(True)
             elif layout_id == 3: self.rad_map3.setChecked(True)
             self.handle_layout_changed(layout_id)
-            
             type_idx = int(self.db.get_config("last_input_type_idx", "7"))
-            if type_idx < self.input_type.count():
-                self.input_type.setCurrentIndex(type_idx)
-        except:
-            pass
+            if type_idx < self.input_type.count(): self.input_type.setCurrentIndex(type_idx)
+        except: pass
 
     def load_history_from_db(self):
         code = self.db.get_c_code()
-        if code:
-            self.parser.parse_structs(code)
-            self.parser.parse_variables(code)
-            
+        if code: self.parser.parse_structs(code)
         db_vars = self.db.get_all_vars()
         for row in db_vars:
             path, v_type, offset, base_var = row[0], row[1], row[2], row[3]
             t_idx = row[4] if len(row) > 4 else 0
-            
-            while self.tab_widget.count() <= t_idx:
-                self.create_new_debug_tab()
-                
-            if '.' not in path and '[' not in path:
-                self.inject_var_to_tree_ui(path, v_type, t_idx)
-                
+            while self.tab_widget.count() <= t_idx: self.create_new_debug_tab()
+            if '.' not in path and '[' not in path: self.inject_var_to_tree_ui(path, v_type, t_idx)
         for row in db_vars:
             path, v_type, offset, base_var = row[0], row[1], row[2], row[3]
             t_idx = row[4] if len(row) > 4 else 0
-            if '.' in path or '[' in path:
-                self.inject_var_to_tree_ui(path, v_type, t_idx)
+            if '.' in path or '[' in path: self.inject_var_to_tree_ui(path, v_type, t_idx)
 
     def handle_high_speed_data(self, batch_data):
         locker = QMutexLocker(self.buffer_mutex)
@@ -965,44 +905,32 @@ class MCUStudioWindow(QMainWindow):
             for ch_idx, val in data_packet.items():
                 self.ch_buffers[ch_idx].append(val)
                 self.ch_time_stamps[ch_idx].append(current_rel_time)
-                
         for i in range(3):
             if len(self.ch_buffers[i]) > 40000:
                 self.ch_buffers[i] = self.ch_buffers[i][-25000:]
                 self.ch_time_stamps[i] = self.ch_time_stamps[i][-25000:]
 
     def update_plot_canvas(self):
-        if self.is_frozen or self.layout_switching: 
-            return
-            
+        if self.is_frozen or self.layout_switching: return
         layout_id = self.current_layout_id
         locker = QMutexLocker(self.buffer_mutex)
-        
         for i in range(3):
-            # 💡 无论画布当前是否隐藏，都让对应分配变量的时间轴向前推移，防止主时序卡死
             active_paths = self.plot_active_paths[i]
             curves_map = self.plot_curves_dict[i]
-            
             ch_idx = -1
             for path in active_paths:
                 for c_i in range(3):
                     if self.ch_paths[c_i] == path:
-                        ch_idx = c_i
-                        break
+                        ch_idx = c_i; break
                 if ch_idx != -1: break
 
             pw = self.plot_widgets[i]
-            # 如果对应的画布已经处于不显示布局状态，直接略过实际的线条绘制
             if i >= 1 and layout_id < 2: continue
             if i == 2 and layout_id < 3: continue
-            
-            if pw.isHidden() or not pw.isVisible() or pw.width() <= 20 or pw.height() <= 20:
-                continue
+            if pw.isHidden() or not pw.isVisible() or pw.width() <= 20 or pw.height() <= 20: continue
                 
             try:  
-                if not pw.getPlotItem().scene(): 
-                    continue
-
+                if not pw.getPlotItem().scene(): continue
                 if ch_idx != -1 and self.ch_time_stamps[ch_idx]:
                     max_x = self.ch_time_stamps[ch_idx][-1]  
                     min_x = max_x - self.max_display_duration_ms
@@ -1014,59 +942,44 @@ class MCUStudioWindow(QMainWindow):
                 
                 curr_keys = list(curves_map.keys())
                 for pk in curr_keys:
-                    if pk not in active_paths:
-                        if pk in curves_map:
-                            pw.removeItem(curves_map[pk])
-                            del curves_map[pk]
+                    if pk not in active_paths and pk in curves_map:
+                        pw.removeItem(curves_map[pk])
+                        del curves_map[pk]
                 
                 for path in active_paths:
                     target_ch = -1
                     for c_i in range(3):
-                        if self.ch_paths[c_i] == path:
-                            target_ch = c_i
-                            break
-                            
+                        if self.ch_paths[c_i] == path: target_ch = c_i; break
                     if target_ch != -1 and self.ch_buffers[target_ch]:
                         t_data = self.ch_time_stamps[target_ch]
                         v_data = self.ch_buffers[target_ch]
-                        
                         start_idx = bisect.bisect_left(t_data, min_x)
                         if len(t_data) > start_idx:
                             x_arr = np.array(t_data[start_idx:], dtype=np.float64)
                             y_arr = np.array(v_data[start_idx:], dtype=np.float64)
-                            
                             if path not in curves_map:
                                 smooth_pen = QPen(QColor(self.ch_colors[target_ch]), 2.0)
                                 smooth_pen.setCosmetic(True)
                                 smooth_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
                                 smooth_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-                                
                                 curves_map[path] = pw.plot(pen=smooth_pen, antialias=True)
-                                
                             curves_map[path].setData(x_arr, y_arr)
-            except:
-                pass 
+            except: pass 
 
     def handle_plot_mouse_move(self, pos, plot_idx):
         if not self.is_frozen or self.layout_switching: return
-
         pw = self.plot_widgets[plot_idx]
-        if pw.isHidden() or not pw.isVisible() or pw.width() <= 20 or pw.height() <= 20:
-            return
+        if pw.isHidden() or not pw.isVisible() or pw.width() <= 20 or pw.height() <= 20: return
 
         active_paths = self.plot_active_paths[plot_idx]
-        
         target_ch = -1
         for path in active_paths:
             for c_i in range(3):
-                if self.ch_paths[c_i] == path:
-                    target_ch = c_i
-                    break
+                if self.ch_paths[c_i] == path: target_ch = c_i; break
             if target_ch != -1: break
 
         locker = QMutexLocker(self.buffer_mutex)
         if target_ch == -1 or not self.ch_buffers[target_ch]: return
-
         t_data = self.ch_time_stamps[target_ch]
         v_data = self.ch_buffers[target_ch]
 
@@ -1074,14 +987,12 @@ class MCUStudioWindow(QMainWindow):
             if not pw.getPlotItem().scene(): return
             mouse_point = pw.getViewBox().mapSceneToView(pos)
             x_mouse = mouse_point.x()
-
             idx = bisect.bisect_left(t_data, x_mouse)
             if idx == 0: closest_idx = 0
             elif idx >= len(t_data): closest_idx = len(t_data) - 1
             else: closest_idx = idx if (t_data[idx] - x_mouse) < (x_mouse - t_data[idx-1]) else (idx - 1)
 
             if closest_idx >= len(t_data): return
-
             exact_x = t_data[closest_idx]
             exact_y = v_data[closest_idx]
 
@@ -1098,30 +1009,23 @@ class MCUStudioWindow(QMainWindow):
                 self.hover_labels[plot_idx].setText(f" t: {exact_x:.1f} ms\n v: {exact_y:.4f} ")
                 self.hover_labels[plot_idx].setPos(exact_x, exact_y)
                 self.hover_labels[plot_idx].setVisible(True)
-        except:
-            pass
+        except: pass
 
     def show_plot_context_menu(self, pos, plot_idx):
         if self.layout_switching: return
         available_paths = [p for p in self.ch_paths if p is not None]
         pw = self.plot_widgets[plot_idx]
         if pw.isHidden() or not pw.isVisible(): return
-        
         try:
             menu = pw.getPlotItem().getContextMenus(None)
             menu.setStyleSheet(POPUP_MENU_STYLE)
-            
             y_val_menu = None
             for act in menu.actions():
                 if act.menu() and "Y_Val" in act.menu().title():
-                    y_val_menu = act.menu()
-                    y_val_menu.clear()
-                    break
-                    
+                    y_val_menu = act.menu(); y_val_menu.clear(); break
             if not y_val_menu:
                 y_val_menu = QMenu("📈 Y_Val 数据源定义", menu)
                 menu.insertMenu(menu.actions()[0] if menu.actions() else None, y_val_menu)
-                
             y_val_menu.setStyleSheet(POPUP_MENU_STYLE)
             
             if not available_paths:
@@ -1135,10 +1039,8 @@ class MCUStudioWindow(QMainWindow):
                     action.triggered.connect(lambda checked, p=path, p_idx=plot_idx, current_state=is_selected: 
                         self.commit_vofa_layer_selection(p, p_idx, current_state))
                     y_val_menu.addAction(action)
-                    
             menu.exec(pw.mapToGlobal(pos))
-        except:
-            pass
+        except: pass
 
     def commit_vofa_layer_selection(self, path, plot_idx, current_state):
         if not current_state:
@@ -1152,43 +1054,42 @@ class MCUStudioWindow(QMainWindow):
         if not tree: return
         item = tree.itemAt(pos)
         if not item: return
-        if "{结构体/数组}" in item.text(2): return 
             
         path = item.data(0, Qt.ItemDataRole.UserRole)
         if not path: path = item.text(0)
         
         menu = QMenu()
         menu.setStyleSheet(POPUP_MENU_STYLE)
-        
         bound_ch_idx = -1
         for i in range(3):
             if self.ch_paths[i] == path: bound_ch_idx = i; break
 
-        if bound_ch_idx != -1:
-            m_unbind = menu.addAction(f"❌ 取消该变量在 通道 {bound_ch_idx+1} 的波形监视")
-        else:
-            m1 = menu.addAction("🟢 绑定至 示波器通道 1")
-            m2 = menu.addAction("🟡 绑定至 示波器通道 2")
-            m3 = menu.addAction("🔵 绑定至 示波器通道 3")
+        is_container = "{结构体/数组}" in item.text(2)
+        if not is_container:
+            if bound_ch_idx != -1:
+                menu.addAction(f"❌ 取消该变量在 通道 {bound_ch_idx+1} 的波形监视")
+            else:
+                m1 = menu.addAction("🟢 绑定至 示波器通道 1")
+                m2 = menu.addAction("🟡 绑定至 示波器通道 2")
+                m3 = menu.addAction("🔵 绑定至 示波器通道 3")
+            menu.addSeparator()
             
-        menu.addSeparator()
-        m_del = menu.addAction("🗑️ 从监视列表中删除该整组变量 (Delete)")
+        m_del = menu.addAction("🗑️ 从监视列表中删除该整组变量及其全部子成员 (Delete)")
         act = menu.exec(tree.viewport().mapToGlobal(pos))
         
-        if 'm_unbind' in locals() and act == m_unbind: self.unbind_channel(bound_ch_idx)
-        elif 'm1' in locals() and act == m1: self.bind_tree_item_to_channel(0, item)
-        elif 'm2' in locals() and act == m2: self.bind_tree_item_to_channel(1, item)
-        elif 'm3' in locals() and act == m3: self.bind_tree_item_to_channel(2, item)
+        if not is_container and bound_ch_idx != -1 and act and "取消" in act.text(): 
+            self.unbind_channel(bound_ch_idx)
+        elif not is_container and 'm1' in locals() and act == m1: self.bind_tree_item_to_channel(0, item)
+        elif not is_container and 'm2' in locals() and act == m2: self.bind_tree_item_to_channel(1, item)
+        elif not is_container and 'm3' in locals() and act == m3: self.bind_tree_item_to_channel(2, item)
         elif act == m_del:
             root_item = item
             while root_item.parent(): root_item = root_item.parent()
             self.remove_variable_root(root_item)
 
     def bind_tree_item_to_channel(self, ch_idx, item):
-        path = item.data(0, Qt.ItemDataRole.UserRole)
-        if not path: path = item.text(0)
+        path = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
         v_type = item.text(1)
-        
         all_db_vars = {x[0]: (x[2], x[3]) for x in self.db.get_all_vars()}
         if path not in all_db_vars: return
         offset, base_var = all_db_vars[path]
@@ -1203,16 +1104,13 @@ class MCUStudioWindow(QMainWindow):
         for i in range(3):
             if self.ch_paths[i] == path: self.unbind_channel(i)
         
-        # 加锁改写通道
         locker = QMutexLocker(self.buffer_mutex)
         self.ch_paths[ch_idx] = path
         self.ch_types[ch_idx] = v_type
         self.ch_addrs[ch_idx] = hex(absolute_address)
         self.ch_buffers[ch_idx] = []
         self.ch_time_stamps[ch_idx] = []
-        
-        if path not in self.plot_active_paths[ch_idx]:
-            self.plot_active_paths[ch_idx].append(path)
+        if path not in self.plot_active_paths[ch_idx]: self.plot_active_paths[ch_idx].append(path)
         
         self.refresh_ui_channel_bar()
         self.restart_sampling_thread()
@@ -1222,15 +1120,12 @@ class MCUStudioWindow(QMainWindow):
         path = self.ch_paths[ch_idx]
         if path:
             for p_idx, p_active in enumerate(self.plot_active_paths):
-                if path in p_active: 
-                    p_active.remove(path)
+                if path in p_active: p_active.remove(path)
                 if path in self.plot_curves_dict[p_idx]:
                     try:
                         self.plot_widgets[p_idx].removeItem(self.plot_curves_dict[p_idx][path])
                         del self.plot_curves_dict[p_idx][path]
-                    except:
-                        pass
-                        
+                    except: pass
         self.ch_paths[ch_idx] = None
         self.ch_types[ch_idx] = None
         self.ch_addrs[ch_idx] = None
@@ -1248,18 +1143,16 @@ class MCUStudioWindow(QMainWindow):
         name = self.input_name.text().strip()
         v_type = self.input_type.currentText()
         if not name: return
-        
         current_tab_idx = self.tab_widget.currentIndex()
         if current_tab_idx < 0: return
 
         if name.startswith("0x") or name.startswith("0X"):
             self.db.save_var(name, v_type, 0, name, current_tab_idx)
             self.inject_var_to_tree_ui(name, v_type, current_tab_idx)
-            self.input_name.clear()
-            return
+            self.input_name.clear(); return
 
         if name not in self.symbol_cache:
-            QMessageBox.warning(self, "提示", f"符号名 '{name}' 暂未在 ELF 固件映射文件中检索到。")
+            QMessageBox.warning(self, "提示", f"符号名 '{name}' 未在 ELF 中检索到。")
             return
         
         self.db.save_var(name, v_type, 0, name, current_tab_idx)
@@ -1269,67 +1162,54 @@ class MCUStudioWindow(QMainWindow):
     def open_advance_parser_window(self):
         current_tab_idx = self.tab_widget.currentIndex()
         if current_tab_idx < 0: return
-        
-        from extract_param import AdvancedWorkspaceDialog
-        
-        # ⚡ 绝不重复开辟新实例，彻底摧毁之前的 dlg.exec() 死锁。
-        # 传入 symbol_cache 和 parent，确保子窗口能读取主窗口 ELF 符号表。
         if not hasattr(self, 'adv_parse_dialog') or self.adv_parse_dialog is None:
             self.adv_parse_dialog = AdvancedWorkspaceDialog(self.db, self.parser, symbol_cache=self.symbol_cache, parent=self)
             self.adv_parse_dialog.symbol_selected_signal.connect(self.process_injected_symbol_from_workspace)
-            
-        # ⚡ 工业级非模态唤醒机制：
         self.adv_parse_dialog.show()
         self.adv_parse_dialog.raise_()
         self.adv_parse_dialog.activateWindow()
 
     def process_injected_symbol_from_workspace(self, path, v_type, offset):
-        """
-        接收并处理并行面板发回来的符号实体，主子窗口同时存活互不干扰
-        """
+        """⚡【核心重构修复点】：无视嵌套还是原生数组，均触发全量打散逻辑，彻底激发出树状组件的箭头"""
         current_tab_idx = self.tab_widget.currentIndex()
         if current_tab_idx < 0: return
         
         base_var = path.split('.')[0].split('[')[0]
-        
-        # 1. 持久化到主系统的数据库中
         self.db.save_var(path, v_type, offset, base_var, current_tab_idx)
         
-        # 2. 如果是复合结构体，打散同步写缓存
-        if v_type in self.parser.structs:
-            sub_items = self.parser.flatten_struct(v_type, prefix=path + ".", base_offset=offset)
-            for sub in sub_items:
-                sub_base = sub['path'].split('.')[0].split('[')[0]
-                self.db.save_var(sub['path'], sub['type'], sub['offset'], sub_base, current_tab_idx)
-        
-        # 3. 动态无闪烁注入主页面左侧的监控树中
+        # 💡 这里直接传入 base_var 的原貌去推演
+        count_val = 1
+        arr_match = re.search(r'\[(\d+)\]', v_type)
+        pure_type = v_type
+        if arr_match:
+            count_val = int(arr_match.group(1))
+            pure_type = re.sub(r'\[.*?\]', '', v_type).strip()
+
+        flat_items = self.parser.flatten_variable({"name": base_var, "type": pure_type, "count": count_val})
+        for fi in flat_items:
+            self.db.save_var(fi["path"], fi["type"], fi["offset"], base_var, current_tab_idx)
+
+        # 级联注入树
         self.inject_var_to_tree_ui(path, v_type, current_tab_idx)
-        
         all_db_vars = self.db.get_all_vars()
         for row in all_db_vars:
             h_path, h_type, _, _, t_idx = row[0], row[1], row[2], row[3], row[4] if len(row)>4 else 0
             if t_idx == current_tab_idx and (h_path.startswith(path + ".") or h_path.startswith(path + "[")):
                 self.inject_var_to_tree_ui(h_path, h_type, current_tab_idx)
-                
-        print(f"⚡ 成功无缝添加变量：{path}")
+        print(f"⚡ 成功无缝添加扁平化级联变量链：{path}")
 
     def handle_tree_item_double_clicked(self, item, column):
         if column != 2: return
-        
         val_text = item.text(2)
         v_type = item.text(1)
         path = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
         
-        if "{结构体/数组}" in val_text or "断开" in val_text or "异常" in val_text:
-            return
-            
-        if v_type in self.parser.structs or v_type == "struct/array":
-            return
+        if "{结构体/数组}" in val_text or "断开" in val_text or "异常" in val_text: return
+        if v_type in self.parser.structs or v_type == "struct/array": return
 
         all_db_paths = [x[0] for x in self.db.get_all_vars()]
         has_children = any(p.startswith(path + ".") or p.startswith(path + "[") for p in all_db_paths if p != path)
-        if has_children:
-            return
+        if has_children: return
         
         tree = self.get_current_tree()
         editor = InPlaceEditLineEdit(tree, val_text, v_type)
@@ -1344,7 +1224,6 @@ class MCUStudioWindow(QMainWindow):
         
         path = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
         v_type = item.text(1)
-        
         all_db_vars = {x[0]: (x[2], x[3]) for x in self.db.get_all_vars()}
         if path not in all_db_vars: return
         offset, base_var = all_db_vars[path]
@@ -1372,6 +1251,7 @@ class MCUStudioWindow(QMainWindow):
         current_tab_idx = self.tab_widget.currentIndex()
         root_name = root_item.text(0)
         for path, _, _, _, t_idx in self.db.get_all_vars():
+            # 💡 【完美修复】：彻底移除掉混入的 nudge 噪声单词，恢复纯净的逻辑判断
             if t_idx == current_tab_idx and (path == root_name or path.startswith(root_name + ".") or path.startswith(root_name + "[")):
                 self.db.delete_var(path, current_tab_idx)
                 for i in range(3):
@@ -1382,26 +1262,22 @@ class MCUStudioWindow(QMainWindow):
             index = tree.indexOfTopLevelItem(root_item)
             if index >= 0: tree.takeTopLevelItem(index)
         self.restart_sampling_thread()
-
+        
     def restart_sampling_thread(self):
         if hasattr(self, 'worker') and self.worker:
-            self.worker.stop()
-            self.worker = None
+            self.worker.stop(); self.worker = None
             
         hz_idx = self.wave_hz_combo.currentIndex()
         if hz_idx == 0:
             try: hz = int(self.custom_hz_edit.text().strip())
             except: hz = 300
-        else:
-            hz = [300, 500, 1000, 2000, 4000, 8000][hz_idx]
+        else: hz = [300, 500, 1000, 2000, 4000, 8000][hz_idx]
             
         self.custom_hz_edit.setEnabled(hz_idx == 0)
         delay = 1.0 / hz
-        
         active_channels = {}
         for i in range(3):
             if self.ch_addrs[i]: active_channels[i] = (self.ch_addrs[i], self.ch_types[i], self.ch_paths[i])
-                
         if active_channels:
             self.worker = HighSpeedSamplingWorker(self.config, active_channels, delay, self.jlink_native_instance)
             self.worker.data_received.connect(self.handle_high_speed_data)
@@ -1411,14 +1287,12 @@ class MCUStudioWindow(QMainWindow):
         if self.layout_switching: return
         all_db_vars = {x[0]: (x[2], x[3], x[4] if len(x)>4 else 0) for x in self.db.get_all_vars()}
         labels = [self.lbl_ch1, self.lbl_ch2, self.lbl_ch3]
-        
         locker = QMutexLocker(self.buffer_mutex)
         
         for i in range(3):
             if self.ch_paths[i]:
                 labels[i].setText(f"CH{i+1}: {self.ch_buffers[i][-1]:.2f}" if (self.ch_buffers[i] and (self.config.backend_mode == "JLINK" or self.openocd_link_alive)) else f"CH{i+1}: 断开")
-            else:
-                labels[i].setText(f"CH{i+1}: 📭 空闲")
+            else: labels[i].setText(f"CH{i+1}: 📭 空闲")
 
         def refresh_item(item, t_idx):
             tree = self.tab_widget.widget(t_idx)
@@ -1432,17 +1306,13 @@ class MCUStudioWindow(QMainWindow):
                 
             for i in range(3):
                 if self.ch_paths[i] == path:
-                    if self.config.backend_mode == "OPENOCD" and not self.openocd_link_alive:
-                        item.setText(2, "断开")
-                    else:
-                        item.setText(2, f"{self.ch_buffers[i][-1]:.4f}" if self.ch_buffers[i] else "载入中")
+                    if self.config.backend_mode == "OPENOCD" and not self.openocd_link_alive: item.setText(2, "断开")
+                    else: item.setText(2, f"{self.ch_buffers[i][-1]:.4f}" if self.ch_buffers[i] else "载入中")
                     return
             
             if path not in all_db_vars: return
             offset, base_var, _ = all_db_vars[path]
-            
-            if base_var.startswith("0x") or base_var.startswith("0X"):
-                absolute_address = int(base_var, 16) + offset
+            if base_var.startswith("0x") or base_var.startswith("0X"): absolute_address = int(base_var, 16) + offset
             else:
                 base_addr = self.symbol_cache.get(base_var)
                 if base_addr is None: return
@@ -1452,10 +1322,7 @@ class MCUStudioWindow(QMainWindow):
             is_custom_enum = (norm_type in self.parser.enums or norm_type.replace("_t", "") in self.parser.enums)
             
             try:
-                if "int8" in norm_type or "char" in norm_type: width_bytes = 1
-                elif "int16" in norm_type: width_bytes = 2
-                else: width_bytes = 4
-
+                width_bytes = 1 if "int8" in norm_type or "char" in norm_type else (2 if "int16" in norm_type else 4)
                 if self.config.backend_mode == "OPENOCD":
                     if not self.openocd_link_alive: raise Exception()
                     cmd = "mdb" if width_bytes == 1 else ("mdh" if width_bytes == 2 else "mdw")
@@ -1468,49 +1335,34 @@ class MCUStudioWindow(QMainWindow):
                     elif width_bytes == 2: raw_int = self.jlink_native_instance.memory_read16(absolute_address, 1)[0]
                     else: raw_int = self.jlink_native_instance.memory_read32(absolute_address, 1)[0]
                 
-                if "uint8" in norm_type: 
-                    v = raw_int & 0xFF
-                elif "int8" in norm_type or "char" in norm_type: 
-                    v = struct.unpack('<b', struct.pack('<B', raw_int & 0xFF))[0]
-                elif "uint16" in norm_type: 
-                    v = raw_int & 0xFFFF
-                elif "int16" in norm_type: 
-                    v = struct.unpack('<h', struct.pack('<H', raw_int & 0xFFFF))[0]
-                elif "uint32" in norm_type: 
-                    v = raw_int & 0xFFFFFFFF
-                elif "float" in norm_type: 
-                    v = struct.unpack('<f', struct.pack('<I', raw_int & 0xFFFFFFFF))[0]
-                elif is_custom_enum: 
-                    v = raw_int & 0xFF
-                else: 
-                    v = struct.unpack('<i', struct.pack('<I', raw_int & 0xFFFFFFFF))[0]
-                
+                if "uint8" in norm_type: v = raw_int & 0xFF
+                elif "int8" in norm_type or "char" in norm_type: v = struct.unpack('<b', struct.pack('<B', raw_int & 0xFF))[0]
+                elif "uint16" in norm_type: v = raw_int & 0xFFFF
+                elif "int16" in norm_type: v = struct.unpack('<h', struct.pack('<H', raw_int & 0xFFFF))[0]
+                elif "uint32" in norm_type: v = raw_int & 0xFFFFFFFF
+                elif "float" in norm_type: v = struct.unpack('<f', struct.pack('<I', raw_int & 0xFFFFFFFF))[0]
+                elif is_custom_enum: v = raw_int & 0xFF
+                else: v = struct.unpack('<i', struct.pack('<I', raw_int & 0xFFFFFFFF))[0]
                 item.setText(2, f"{v:.4f}" if "float" in norm_type else str(v))
-            except:
-                item.setText(2, "断开")
-                
+            except: item.setText(2, "断开")
             for idx in range(item.childCount()): refresh_item(item.child(idx), t_idx)
 
         for tab_i in range(self.tab_widget.count()):
             tree = self.tab_widget.widget(tab_i)
             if tree:
-                for i in range(tree.topLevelItemCount()): 
-                    refresh_item(tree.topLevelItem(i), tab_i)
+                for i in range(tree.topLevelItemCount()): refresh_item(tree.topLevelItem(i), tab_i)
 
     def inject_var_to_tree_ui(self, path, v_type, tab_idx):
         tree = self.tab_widget.widget(tab_idx)
         if not tree: return
-        
         parts = re.findall(r'^[a-zA-Z_]\w*|\.[a-zA-Z_]\w*|\[\d+\]', path)
         if not parts: return
-
         current_parent = None
         current_path_accumulator = ""
 
         for i, part in enumerate(parts):
             current_path_accumulator += part
             display_name = part.lstrip('.')  
-            
             found_child = None
             if current_parent is None:
                 for idx in range(tree.topLevelItemCount()):
@@ -1526,26 +1378,19 @@ class MCUStudioWindow(QMainWindow):
                 for h_path, h_type, _, _, h_t_idx in self.db.get_all_vars():
                     if h_t_idx == tab_idx and h_path == current_path_accumulator:
                         child_type = h_type; break
-                
-                if child_type == "{未知}" and i < len(parts) - 1:
-                    child_type = "struct/array"
+                if child_type == "{未知}" and i < len(parts) - 1: child_type = "struct/array"
 
                 is_container = (child_type in self.parser.structs or 
                                 ("[" in child_type and not re.search(r'\[\d+\]$', current_path_accumulator)) or 
                                 i < len(parts) - 1 or 
                                 child_type == "struct/array")
-                
                 val_display = "{结构体/数组}" if is_container else "读取中..."
-                
                 new_item = QTreeWidgetItem([display_name, child_type, val_display])
                 new_item.setData(0, Qt.ItemDataRole.UserRole, current_path_accumulator)
                 
-                if current_parent is None:
-                    tree.addTopLevelItem(new_item)
-                else:
-                    current_parent.addChild(new_item)
+                if current_parent is None: tree.addTopLevelItem(new_item)
+                else: current_parent.addChild(new_node if 'new_node' in locals() else new_item)
                 found_child = new_item
-            
             current_parent = found_child
 
     def update_hardware_heartbeat(self):
@@ -1553,8 +1398,7 @@ class MCUStudioWindow(QMainWindow):
         if self.config.backend_mode == "OPENOCD":
             worker_alive = hasattr(self, 'worker') and self.worker and self.worker.isRunning() and self.worker.is_link_alive
             is_alive = worker_alive and self.openocd_link_alive
-        else:
-            is_alive = True if (self.jlink_native_instance and self.jlink_native_instance.target_connected()) else False
+        else: is_alive = True if (self.jlink_native_instance and self.jlink_native_instance.target_connected()) else False
 
         if is_alive:
             self.heartbeat_state = not self.heartbeat_state
@@ -1567,8 +1411,7 @@ class MCUStudioWindow(QMainWindow):
             self.lbl_status_text.setStyleSheet("color: #d32f2f; font-family: 'Microsoft YaHei'; font-size: 11px; font-weight: bold;")
 
     def closeEvent(self, event):
-        if hasattr(self, 'worker') and self.worker: 
-            self.worker.stop()
+        if hasattr(self, 'worker') and self.worker: self.worker.stop()
         if self.tcl_socket:
             try: self.tcl_socket.close()
             except: pass
@@ -1620,8 +1463,7 @@ class HighSpeedSamplingWorker(QThread):
                 s.settimeout(0.3)
                 s.connect((self.config.openocd_host, self.config.tcl_port))
                 self.is_link_alive = True
-            except:
-                self.is_link_alive = False
+            except: self.is_link_alive = False
 
         local_batch = []
         last_flush_time = time.time()
@@ -1629,11 +1471,9 @@ class HighSpeedSamplingWorker(QThread):
         while self.running:
             t_now = time.time()
             packet = {}
-
             if self.config.backend_mode == "OPENOCD":
                 if not merged_cmd_bytes or not self.is_link_alive:
-                    time.sleep(0.04)
-                    continue
+                    time.sleep(0.04); continue
                 try:
                     s.sendall(merged_cmd_bytes)
                     res = s.recv(2048).decode('utf-8').replace('\x1a', '').strip()
@@ -1656,8 +1496,7 @@ class HighSpeedSamplingWorker(QThread):
                                 raw_int = int(lines[i].split(":")[-1].strip(), 16)
                                 packet[c['ch_idx']] = struct.unpack('<f', struct.pack('<I', raw_int))[0] if c['is_float'] else float(raw_int)
                 except: 
-                    self.is_link_alive = False  
-                    continue
+                    self.is_link_alive = False; continue
             else:
                 if self.jlink and self.jlink.target_connected():
                     try:
@@ -1667,17 +1506,14 @@ class HighSpeedSamplingWorker(QThread):
                             else: raw = self.jlink.memory_read32(c['addr'], 1)[0]
                             packet[c['ch_idx']] = struct.unpack('<f', struct.pack('<I', raw))[0] if c['is_float'] else float(raw)
                     except: 
-                        time.sleep(0.04) 
-                        continue
+                        time.sleep(0.04); continue
                 else:
-                    time.sleep(0.04)
-                    continue
+                    time.sleep(0.04); continue
 
             if packet: local_batch.append((t_now, packet))
             if len(local_batch) >= 20 or (t_now - last_flush_time > 0.025):
                 if self.running and local_batch: self.data_received.emit(local_batch)
                 local_batch, last_flush_time = [], t_now
-
             if self.sample_delay > 0: time.sleep(self.sample_delay)
 
         if s: 

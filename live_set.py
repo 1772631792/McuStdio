@@ -11,6 +11,7 @@ import psutil
 import bisect
 import platform  
 import numpy as np 
+from typing import Any, Dict
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QTreeWidget, QTreeWidgetItem, 
@@ -25,8 +26,17 @@ import pyqtgraph as pg
 
 pg.setConfigOptions(useOpenGL=False, antialias=True)
 
-# 💡 完美闭环合并：从同级目录下的 extract_param 中直接引入对齐解析机
-from extract_param import InnerStructParser, AdvancedWorkspaceDialog
+try:
+    from elftools.dwarf.descriptions import describe_form_class
+    from elftools.dwarf.dwarf_expr import DWARFExprParser
+    from elftools.elf.elffile import ELFFile
+except ImportError as exc:
+    ELFFile = None
+    DWARFExprParser = None
+    describe_form_class = None
+    ELFTOOLS_IMPORT_ERROR = exc
+else:
+    ELFTOOLS_IMPORT_ERROR = None
 
 try:
     import pylink
@@ -61,6 +71,187 @@ POPUP_MENU_STYLE = """
     QMenu::item:selected { background-color: #1e88e5; color: #ffffff; }
     QMenu::separator { height: 1px; background-color: #444444; margin: 4px 0px; }
 """
+
+MAX_ARRAY_ELEMENTS = 4096
+MAX_TYPE_DEPTH = 24
+
+
+def type_label(type_info: Dict[str, Any]) -> str:
+    return str(type_info.get("name") or type_info.get("kind", "<unknown>"))
+
+
+def scalar_size(type_info: Dict[str, Any]) -> int:
+    if type_info.get("kind") not in ("scalar", "enum", "pointer"):
+        return 0
+    return int(type_info.get("size", 0) or 0)
+
+
+class ElfDatabase:
+    """Direct ELF symbol/DWARF reader. No source-project scan is required."""
+
+    def __init__(self):
+        self.path = ""
+        self.symbols = {}
+        self.types = {}
+        self._type_cache = {}
+        self._expr_parser = None
+
+    @staticmethod
+    def _text(value, default=""):
+        return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else (str(value) if value is not None else default)
+
+    def _member_offset(self, attr):
+        if attr is None: return 0
+        if describe_form_class(attr.form) == "constant": return int(attr.value)
+        if describe_form_class(attr.form) in ("exprloc", "block") and self._expr_parser:
+            try:
+                ops = self._expr_parser.parse_expr(attr.value)
+                if len(ops) == 1 and ops[0].op_name == "DW_OP_plus_uconst": return int(ops[0].args[0])
+            except Exception: pass
+        return 0
+
+    def _parse_type(self, die):
+        if die is None: return {"kind": "unknown", "name": "<unknown>", "size": 0}
+        if die.offset in self._type_cache: return self._type_cache[die.offset]
+        info = {"kind": "unknown", "name": "<unknown>", "size": 0}
+        self._type_cache[die.offset] = info
+        attrs = die.attributes
+        name_attr = attrs.get("DW_AT_name")
+        name = self._text(name_attr.value) if name_attr else ""
+        size = int(attrs["DW_AT_byte_size"].value) if "DW_AT_byte_size" in attrs else 0
+
+        def referenced():
+            return self._parse_type(die.get_DIE_from_attribute("DW_AT_type")) if "DW_AT_type" in attrs else {"kind": "unknown", "name": "<unknown>", "size": 0}
+
+        if die.tag == "DW_TAG_base_type":
+            parsed = {"kind": "scalar", "name": name or "<scalar>", "size": size,
+                      "encoding": int(attrs["DW_AT_encoding"].value) if "DW_AT_encoding" in attrs else 0}
+        elif die.tag == "DW_TAG_enumeration_type":
+            values = {}
+            for child in die.iter_children():
+                if child.tag == "DW_TAG_enumerator":
+                    n, v = child.attributes.get("DW_AT_name"), child.attributes.get("DW_AT_const_value")
+                    if n is not None and v is not None: values[int(v.value)] = self._text(n.value)
+            parsed = {"kind": "enum", "name": name or "<enum>", "size": size or 4, "values": values}
+        elif die.tag == "DW_TAG_pointer_type":
+            target = referenced()
+            parsed = {"kind": "pointer", "name": f"{type_label(target)} *", "size": size or 4, "target": target}
+        elif die.tag == "DW_TAG_array_type":
+            parsed = referenced()
+            dimensions = []
+            for child in die.iter_children():
+                if child.tag != "DW_TAG_subrange_type": continue
+                if "DW_AT_count" in child.attributes: dimensions.append(int(child.attributes["DW_AT_count"].value))
+                elif "DW_AT_upper_bound" in child.attributes: dimensions.append(int(child.attributes["DW_AT_upper_bound"].value) + 1)
+            for count in reversed(dimensions or [0]):
+                parsed = {"kind": "array", "name": f"{type_label(parsed)}[{count or '?'}]",
+                          "size": int(parsed.get("size", 0)) * count, "count": count, "element": parsed}
+        elif die.tag in ("DW_TAG_structure_type", "DW_TAG_union_type"):
+            kind = "struct" if die.tag == "DW_TAG_structure_type" else "union"
+            members = []
+            for child in die.iter_children():
+                if child.tag != "DW_TAG_member" or "DW_AT_type" not in child.attributes: continue
+                n = child.attributes.get("DW_AT_name")
+                members.append({"name": self._text(n.value, "<anonymous>") if n else "<anonymous>",
+                                "offset": 0 if kind == "union" else self._member_offset(child.attributes.get("DW_AT_data_member_location")),
+                                "type": self._parse_type(child.get_DIE_from_attribute("DW_AT_type"))})
+            parsed = {"kind": kind, "name": name or f"<anonymous {kind}>", "size": size, "members": members}
+        elif die.tag == "DW_TAG_typedef":
+            parsed = dict(referenced()); parsed["name"] = name or type_label(parsed)
+        elif die.tag in ("DW_TAG_const_type", "DW_TAG_volatile_type", "DW_TAG_restrict_type", "DW_TAG_atomic_type"):
+            parsed = referenced()
+        else:
+            parsed = {"kind": "unknown", "name": name or die.tag.replace("DW_TAG_", ""), "size": size}
+        if parsed is not info: info.clear(); info.update(parsed)
+        return info
+
+    def load(self, path):
+        if ELFFile is None: raise RuntimeError(f"缺少 pyelftools：{ELFTOOLS_IMPORT_ERROR}\n请执行 pip install pyelftools")
+        symbols, types = {}, {}
+        with open(path, "rb") as stream:
+            elf = ELFFile(stream)
+            for section in elf.iter_sections():
+                if section.header.sh_type not in ("SHT_SYMTAB", "SHT_DYNSYM"): continue
+                for symbol in section.iter_symbols():
+                    entry = symbol.entry
+                    if entry["st_info"]["type"] == "STT_OBJECT" and symbol.name and int(entry["st_value"]):
+                        symbols.setdefault(symbol.name, int(entry["st_value"]))
+            if elf.has_dwarf_info():
+                dwarf = elf.get_dwarf_info(); self._expr_parser = DWARFExprParser(dwarf.structs); self._type_cache = {}
+                for cu in dwarf.iter_CUs():
+                    for die in cu.iter_DIEs():
+                        if die.tag != "DW_TAG_variable": continue
+                        if die.attributes.get("DW_AT_declaration") and die.attributes["DW_AT_declaration"].value: continue
+                        declaration = die.get_DIE_from_attribute("DW_AT_specification") if "DW_AT_specification" in die.attributes else None
+                        n = die.attributes.get("DW_AT_name") or (declaration.attributes.get("DW_AT_name") if declaration else None)
+                        if not n: continue
+                        variable_name = self._text(n.value)
+                        type_die = die if "DW_AT_type" in die.attributes else declaration
+                        if variable_name in symbols and type_die is not None and "DW_AT_type" in type_die.attributes:
+                            types[variable_name] = self._parse_type(type_die.get_DIE_from_attribute("DW_AT_type"))
+        if not symbols: raise RuntimeError("ELF 中没有可用的全局数据符号")
+        self.path, self.symbols, self.types = os.path.abspath(path), symbols, types
+
+    def resolve(self, expression):
+        match = re.match(r"^([A-Za-z_]\w*)", expression.strip())
+        if not match: raise ValueError("无效变量表达式")
+        root = match.group(1)
+        if root not in self.symbols: raise KeyError(f"找不到变量：{root}")
+        if root not in self.types: raise KeyError(f"变量 {root} 没有 DWARF 类型信息，请使用带 -g 的 ELF")
+        address, info, pos = self.symbols[root], self.types[root], match.end()
+        while pos < len(expression):
+            rest = expression[pos:]
+            index_match = re.match(r"^\[(\d+)\]", rest)
+            if index_match:
+                if info.get("kind") != "array": raise ValueError(f"{expression[:pos]} 不是数组")
+                index, count = int(index_match.group(1)), int(info.get("count", 0))
+                if not 0 <= index < count: raise IndexError("数组下标越界")
+                element = info["element"]; address += index * int(element.get("size", 0)); info = element; pos += index_match.end(); continue
+            member_match = re.match(r"^\.([A-Za-z_]\w*)", rest)
+            if member_match:
+                if info.get("kind") not in ("struct", "union"): raise ValueError(f"{expression[:pos]} 不是结构体/联合体")
+                member = next((m for m in info.get("members", []) if m["name"] == member_match.group(1)), None)
+                if member is None: raise KeyError(f"找不到成员：{member_match.group(1)}")
+                address += int(member["offset"]); info = member["type"]; pos += member_match.end(); continue
+            raise ValueError(f"无法解析：{expression[pos:]}")
+        return address, info
+
+    def flatten(self, root):
+        address, root_info = self.resolve(root)
+        records = []
+        def visit(path, addr, info, depth, visited):
+            records.append({"path": path, "type": type_label(info), "offset": addr - address, "info": info})
+            if depth >= MAX_TYPE_DEPTH or id(info) in visited: return
+            visited = set(visited); visited.add(id(info))
+            if info.get("kind") == "array":
+                element = info.get("element", {}); element_size = int(element.get("size", 0) or 0)
+                for i in range(min(int(info.get("count", 0) or 0), MAX_ARRAY_ELEMENTS)):
+                    visit(f"{path}[{i}]", addr + i * element_size, element, depth + 1, visited)
+            elif info.get("kind") in ("struct", "union"):
+                for member in info.get("members", []):
+                    visit(f"{path}.{member['name']}", addr + int(member["offset"]), member["type"], depth + 1, visited)
+        visit(root, address, root_info, 0, set())
+        return records
+
+
+class ElfVariableDialog(QDialog):
+    symbol_selected_signal = pyqtSignal(str)
+    def __init__(self, elf_db, parent=None):
+        super().__init__(parent); self.elf_db = elf_db
+        self.setWindowTitle("ELF 变量浏览器（符号表 + DWARF）"); self.resize(780, 620)
+        layout = QVBoxLayout(self); self.search = QLineEdit(); self.search.setPlaceholderText("搜索 ELF 全局变量…"); layout.addWidget(self.search)
+        self.tree = QTreeWidget(); self.tree.setColumnCount(3); self.tree.setHeaderLabels(["变量", "DWARF 类型", "地址"]); self.tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); layout.addWidget(self.tree)
+        buttons = QHBoxLayout(); buttons.addStretch(); add = QPushButton("添加选中变量到监视"); add.clicked.connect(self._accept_item); buttons.addWidget(add); layout.addLayout(buttons)
+        self.search.textChanged.connect(self._fill); self.tree.itemDoubleClicked.connect(lambda *_: self._accept_item()); self._fill()
+    def _fill(self):
+        keyword = self.search.text().strip().lower(); self.tree.clear()
+        for name in sorted(self.elf_db.symbols):
+            info = self.elf_db.types.get(name)
+            if info is None or (keyword and keyword not in name.lower() and keyword not in type_label(info).lower()): continue
+            item = QTreeWidgetItem([name, type_label(info), f"0x{self.elf_db.symbols[name]:08X}"]); item.setData(0, Qt.ItemDataRole.UserRole, name); self.tree.addTopLevelItem(item)
+    def _accept_item(self):
+        item = self.tree.currentItem()
+        if item: self.symbol_selected_signal.emit(item.data(0, Qt.ItemDataRole.UserRole)); self.close()
 
 class ProjectConfig:
     def __init__(self):
@@ -168,12 +359,6 @@ class LoginConfigDialog(QDialog):
         btn_elf.clicked.connect(lambda: self.select_file(self.elf_edit, "选择 ELF 固件", "ELF Files (*.elf)"))
         h1 = QHBoxLayout(); h1.addWidget(self.elf_edit); h1.addWidget(btn_elf)
         form.addRow("🔄 固件编译文件 (.elf):", h1)
-
-        self.nm_edit = QLineEdit()
-        btn_nm = QPushButton("...")
-        btn_nm.clicked.connect(lambda: self.select_file(self.nm_edit, "选择 nm.exe", "Executable (*.exe)"))
-        h2 = QHBoxLayout(); h2.addWidget(self.nm_edit); h2.addWidget(btn_nm)
-        form.addRow("🔨 NM 工具路径 (nm.exe):", h2)
 
         form.addRow(QLabel("<hr/><b>🛠️ 调试器驱动内核主选择：</b>"))
 
@@ -302,7 +487,6 @@ class LoginConfigDialog(QDialog):
 
     def load_saved_config(self):
         self.elf_edit.setText(self.db.get_config("elf_path"))
-        self.nm_edit.setText(self.db.get_config("nm_path"))
         self.openocd_edit.setText(self.db.get_config("openocd_exe"))
         self.jlink_dir_edit.setText(self.db.get_config("jlink_dll_dir", "C:\\Program Files\\SEGGER\\JLink"))
         self.jlink_device_edit.setText(self.db.get_config("jlink_device", "Cortex-M0+"))
@@ -319,11 +503,9 @@ class LoginConfigDialog(QDialog):
     def handle_connect(self):
         if hasattr(self, 'detect_timer'): self.detect_timer.stop()
         self.config.elf_path = self.elf_edit.text().strip()
-        self.config.nm_path = self.nm_edit.text().strip()
         self.config.backend_mode = "JLINK" if self.driver_mode_combo.currentIndex() == 0 else "OPENOCD"
         
         self.db.save_config("elf_path", self.config.elf_path)
-        self.db.save_config("nm_path", self.config.nm_path)
         self.db.save_config("backend_mode", self.config.backend_mode)
 
         if self.config.backend_mode == "OPENOCD":
@@ -365,10 +547,14 @@ class LoginConfigDialog(QDialog):
 class InPlaceEditLineEdit(QLineEdit):
     editing_finished_signal = pyqtSignal(str)
 
-    def __init__(self, parent, initial_text, val_type):
+    def __init__(self, parent, initial_text, val_type, type_info=None):
         super().__init__(parent)
         self.setText(initial_text)
-        if "float" in val_type or "double" in val_type:
+        if type_info and type_info.get("kind") == "enum":
+            self.setPlaceholderText("可输入枚举名或数值")
+        elif type_info and (type_info.get("kind") == "pointer" or int(type_info.get("encoding", 0) or 0) == 0x02):
+            self.setPlaceholderText("可输入 true/false 或 0x 数值")
+        elif (type_info and int(type_info.get("encoding", 0) or 0) == 0x04) or "float" in val_type or "double" in val_type:
             self.setValidator(QDoubleValidator(self))
         else:
             self.setValidator(QIntValidator(-2147483648, 2147483647, self))
@@ -429,7 +615,7 @@ class MCUStudioWindow(QMainWindow):
         self.setWindowTitle(f"MCU Live Watch Studio - [{'原生J-Link独占' if config.backend_mode=='JLINK' else 'OpenOCD驱动'}]")
         self.resize(1450, 850)
         
-        self.parser = InnerStructParser()
+        self.elf_db = ElfDatabase()
         self.symbol_cache = {}
         self.worker = None 
         self.jlink_native_instance = None 
@@ -513,14 +699,61 @@ class MCUStudioWindow(QMainWindow):
 
     def load_elf_symbols(self):  
         try:
-            if not self.config.nm_path or not self.config.elf_path: return
-            if not os.path.exists(self.config.nm_path) or not os.path.exists(self.config.elf_path): return
-            res = subprocess.run([self.config.nm_path, "-C", self.config.elf_path], stdout=subprocess.PIPE, text=True, check=True)
-            matches = re.findall(r"^([0-9a-fA-F]+)\s+[BbDdGgSs]\s+([a-zA-Z_][a-zA-Z0-9_]*)$", res.stdout, re.MULTILINE)
-            self.symbol_cache = {name: int(addr, 16) for addr, name in matches}
+            if self.config.elf_path and os.path.exists(self.config.elf_path):
+                self.elf_db.load(self.config.elf_path)
+                self.symbol_cache = dict(self.elf_db.symbols)
+                print(f"ELF loaded: {len(self.symbol_cache)} symbols, {len(self.elf_db.types)} DWARF variables")
+                return
             print(f"⚡ ELF 符号表加载成功，共包含 {len(self.symbol_cache)} 个有效全局变量。")
         except Exception as e:
             print(f"❌ ELF 符号表加载异常: {e}")
+
+    def type_info_for_path(self, path):
+        if path.startswith(("0x", "0X")): return None
+        try: return self.elf_db.resolve(path)[1]
+        except Exception: return None
+
+    @staticmethod
+    def decode_value(data, info):
+        size, encoding, kind = len(data), int(info.get("encoding", 0) or 0), info.get("kind")
+        if kind == "pointer": return f"0x{int.from_bytes(data, 'little'):0{size * 2}X}"
+        if encoding == 0x04 and size in (4, 8): return struct.unpack("<f" if size == 4 else "<d", data)[0]
+        number = int.from_bytes(data, "little", signed=encoding in (0x05, 0x06))
+        if kind == "enum":
+            enum_name = info.get("values", {}).get(number)
+            return f"{enum_name} ({number})" if enum_name else number
+        if encoding == 0x02: return bool(number)
+        return number
+
+    @staticmethod
+    def encode_value(text, info):
+        size, encoding = scalar_size(info), int(info.get("encoding", 0) or 0)
+        if not size: raise ValueError("该节点不是可写标量")
+        if info.get("kind") == "enum":
+            reverse = {name: value for value, name in info.get("values", {}).items()}
+            number = reverse[text] if text in reverse else int(text, 0)
+            return int(number).to_bytes(size, "little", signed=number < 0)
+        if encoding == 0x04 and size in (4, 8): return struct.pack("<f" if size == 4 else "<d", float(text))
+        if encoding == 0x02 and text.lower() in ("true", "false"): number = 1 if text.lower() == "true" else 0
+        else: number = int(text, 0)
+        return number.to_bytes(size, "little", signed=encoding in (0x05, 0x06))
+
+    def read_memory_bytes(self, address, size):
+        if self.config.backend_mode == "JLINK":
+            if not self.jlink_native_instance or not self.jlink_native_instance.target_connected(): raise RuntimeError("链路断开")
+            return bytes(self.jlink_native_instance.memory_read8(address, size))
+        result = bytearray()
+        for offset in range(size):
+            res = self.send_tcl_cmd(f"mdb {hex(address + offset)}")
+            if "ERROR" in res or ":" not in res: raise RuntimeError("链路断开")
+            result.append(int(res.split(":")[-1].strip().split()[0], 16) & 0xFF)
+        return bytes(result)
+
+    def write_memory_bytes(self, address, data):
+        if self.config.backend_mode == "JLINK":
+            if not self.jlink_native_instance or not self.jlink_native_instance.target_connected(): raise RuntimeError("链路断开")
+            self.jlink_native_instance.memory_write8(address, list(data)); return
+        for offset, value in enumerate(data): self.send_tcl_cmd(f"mwb {hex(address + offset)} {value}")
 
     def send_write_command(self, addr_hex, val_int, width_bytes, is_float=False):
         try:
@@ -644,7 +877,7 @@ class MCUStudioWindow(QMainWindow):
         btn_add = QPushButton("➕ 快捷添加监视")
         btn_add.clicked.connect(self.quick_add_variable)
         
-        btn_adv_c = QPushButton("🚀C 源码工程提取变量")
+        btn_adv_c = QPushButton("🚀 ELF 变量浏览器")
         btn_adv_c.setStyleSheet("background-color: #0d47a1; color: white; font-weight: bold;")
         btn_adv_c.clicked.connect(self.open_advance_parser_window)
 
@@ -885,8 +1118,16 @@ class MCUStudioWindow(QMainWindow):
         except: pass
 
     def load_history_from_db(self):
-        code = self.db.get_c_code()
-        if code: self.parser.parse_structs(code)
+        # Refresh saved variable layouts from this ELF so stale source-derived
+        # offsets in an existing history database cannot be reused.
+        old_rows = self.db.get_all_vars()
+        roots = {row[3] for row in old_rows if row[3] in self.elf_db.types}
+        for root in roots:
+            for tab_idx in {row[4] for row in old_rows if row[3] == root}:
+                for row in old_rows:
+                    if row[3] == root and row[4] == tab_idx: self.db.delete_var(row[0], tab_idx)
+                for record in self.elf_db.flatten(root):
+                    self.db.save_var(record["path"], record["type"], record["offset"], root, tab_idx)
         db_vars = self.db.get_all_vars()
         for row in db_vars:
             path, v_type, offset, base_var = row[0], row[1], row[2], row[3]
@@ -1154,49 +1395,36 @@ class MCUStudioWindow(QMainWindow):
         if name not in self.symbol_cache:
             QMessageBox.warning(self, "提示", f"符号名 '{name}' 未在 ELF 中检索到。")
             return
-        
-        self.db.save_var(name, v_type, 0, name, current_tab_idx)
-        self.inject_var_to_tree_ui(name, v_type, current_tab_idx)
+        if name in self.elf_db.types:
+            self.add_elf_variable(name)
+        else:
+            self.db.save_var(name, v_type, 0, name, current_tab_idx)
+            self.inject_var_to_tree_ui(name, v_type, current_tab_idx)
         self.input_name.clear()
 
     def open_advance_parser_window(self):
+        if not self.elf_db.types:
+            QMessageBox.warning(self, "ELF 类型信息", "当前 ELF 中没有可用的 DWARF 变量类型，请确保编译时带 -g。")
+            return
+        self.adv_parse_dialog = ElfVariableDialog(self.elf_db, self)
+        self.adv_parse_dialog.symbol_selected_signal.connect(self.add_elf_variable)
+        self.adv_parse_dialog.show()
+
+    def add_elf_variable(self, root):
         current_tab_idx = self.tab_widget.currentIndex()
         if current_tab_idx < 0: return
-        if not hasattr(self, 'adv_parse_dialog') or self.adv_parse_dialog is None:
-            self.adv_parse_dialog = AdvancedWorkspaceDialog(self.db, self.parser, symbol_cache=self.symbol_cache, parent=self)
-            self.adv_parse_dialog.symbol_selected_signal.connect(self.process_injected_symbol_from_workspace)
-        self.adv_parse_dialog.show()
-        self.adv_parse_dialog.raise_()
-        self.adv_parse_dialog.activateWindow()
+        try: records = self.elf_db.flatten(root)
+        except Exception as exc:
+            QMessageBox.warning(self, "ELF 变量解析失败", str(exc)); return
+        for record in records:
+            self.db.save_var(record["path"], record["type"], record["offset"], root, current_tab_idx)
+        for record in records:
+            self.inject_var_to_tree_ui(record["path"], record["type"], current_tab_idx)
 
     def process_injected_symbol_from_workspace(self, path, v_type, offset):
-        """⚡【核心重构修复点】：无视嵌套还是原生数组，均触发全量打散逻辑，彻底激发出树状组件的箭头"""
-        current_tab_idx = self.tab_widget.currentIndex()
-        if current_tab_idx < 0: return
-        
-        base_var = path.split('.')[0].split('[')[0]
-        self.db.save_var(path, v_type, offset, base_var, current_tab_idx)
-        
-        # 💡 这里直接传入 base_var 的原貌去推演
-        count_val = 1
-        arr_match = re.search(r'\[(\d+)\]', v_type)
-        pure_type = v_type
-        if arr_match:
-            count_val = int(arr_match.group(1))
-            pure_type = re.sub(r'\[.*?\]', '', v_type).strip()
-
-        flat_items = self.parser.flatten_variable({"name": base_var, "type": pure_type, "count": count_val})
-        for fi in flat_items:
-            self.db.save_var(fi["path"], fi["type"], fi["offset"], base_var, current_tab_idx)
-
-        # 级联注入树
-        self.inject_var_to_tree_ui(path, v_type, current_tab_idx)
-        all_db_vars = self.db.get_all_vars()
-        for row in all_db_vars:
-            h_path, h_type, _, _, t_idx = row[0], row[1], row[2], row[3], row[4] if len(row)>4 else 0
-            if t_idx == current_tab_idx and (h_path.startswith(path + ".") or h_path.startswith(path + "[")):
-                self.inject_var_to_tree_ui(h_path, h_type, current_tab_idx)
-        print(f"⚡ 成功无缝添加扁平化级联变量链：{path}")
+        # Kept as a compatibility entry point for old callers; extraction is
+        # now always based on the root symbol's DWARF description in the ELF.
+        self.add_elf_variable(path.split('.')[0].split('[')[0])
 
     def handle_tree_item_double_clicked(self, item, column):
         if column != 2: return
@@ -1205,14 +1433,17 @@ class MCUStudioWindow(QMainWindow):
         path = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
         
         if "{结构体/数组}" in val_text or "断开" in val_text or "异常" in val_text: return
-        if v_type in self.parser.structs or v_type == "struct/array": return
+        type_info = self.type_info_for_path(path)
+        if type_info is not None and not scalar_size(type_info): return
 
         all_db_paths = [x[0] for x in self.db.get_all_vars()]
         has_children = any(p.startswith(path + ".") or p.startswith(path + "[") for p in all_db_paths if p != path)
         if has_children: return
         
         tree = self.get_current_tree()
-        editor = InPlaceEditLineEdit(tree, val_text, v_type)
+        initial_text = val_text
+        if type_info and type_info.get("kind") == "enum" and " (" in initial_text: initial_text = initial_text.rsplit(" (", 1)[0]
+        editor = InPlaceEditLineEdit(tree, initial_text, v_type, type_info)
         tree.setItemWidget(item, column, editor)
         editor.setFocus()
         editor.editing_finished_signal.connect(lambda text: self.finish_tree_item_editing(item, column, text))
@@ -1235,10 +1466,15 @@ class MCUStudioWindow(QMainWindow):
             if base_addr is None: return
             addr_hex = hex(base_addr + offset)
             
-        norm_type = v_type.replace("_t", "").strip()
-        width = 1 if "int8" in norm_type or "char" in norm_type else (2 if "int16" in norm_type else 4)
-        
         try:
+            type_info = self.type_info_for_path(path)
+            if type_info is not None:
+                data = self.encode_value(new_text, type_info)
+                self.write_memory_bytes(int(addr_hex, 16), data)
+                item.setText(2, new_text)
+                return
+            norm_type = v_type.replace("_t", "").strip()
+            width = 1 if "int8" in norm_type or "char" in norm_type else (2 if "int16" in norm_type else 4)
             if "float" in norm_type:
                 raw_int = struct.unpack('<I', struct.pack('<f', float(new_text)))[0]
                 self.send_write_command(addr_hex, raw_int, 4, is_float=True)
@@ -1279,7 +1515,7 @@ class MCUStudioWindow(QMainWindow):
         for i in range(3):
             if self.ch_addrs[i]: active_channels[i] = (self.ch_addrs[i], self.ch_types[i], self.ch_paths[i])
         if active_channels:
-            self.worker = HighSpeedSamplingWorker(self.config, active_channels, delay, self.jlink_native_instance)
+            self.worker = HighSpeedSamplingWorker(self.config, active_channels, delay, self.jlink_native_instance, self.elf_db)
             self.worker.data_received.connect(self.handle_high_speed_data)
             self.worker.start()
 
@@ -1318,10 +1554,15 @@ class MCUStudioWindow(QMainWindow):
                 if base_addr is None: return
                 absolute_address = base_addr + offset
             
-            norm_type = v_type.strip()
-            is_custom_enum = (norm_type in self.parser.enums or norm_type.replace("_t", "") in self.parser.enums)
-            
             try:
+                type_info = self.type_info_for_path(path)
+                if type_info is not None and scalar_size(type_info):
+                    value = self.decode_value(self.read_memory_bytes(absolute_address, scalar_size(type_info)), type_info)
+                    item.setText(2, f"{value:.4f}" if isinstance(value, float) else str(value))
+                    for idx in range(item.childCount()): refresh_item(item.child(idx), t_idx)
+                    return
+                norm_type = v_type.strip()
+                is_custom_enum = False
                 width_bytes = 1 if "int8" in norm_type or "char" in norm_type else (2 if "int16" in norm_type else 4)
                 if self.config.backend_mode == "OPENOCD":
                     if not self.openocd_link_alive: raise Exception()
@@ -1380,16 +1621,16 @@ class MCUStudioWindow(QMainWindow):
                         child_type = h_type; break
                 if child_type == "{未知}" and i < len(parts) - 1: child_type = "struct/array"
 
-                is_container = (child_type in self.parser.structs or 
-                                ("[" in child_type and not re.search(r'\[\d+\]$', current_path_accumulator)) or 
-                                i < len(parts) - 1 or 
-                                child_type == "struct/array")
+                node_info = self.type_info_for_path(current_path_accumulator)
+                is_container = ((node_info is not None and not scalar_size(node_info)) or
+                                ("[" in child_type and not re.search(r'\[\d+\]$', current_path_accumulator)) or
+                                i < len(parts) - 1 or child_type == "struct/array")
                 val_display = "{结构体/数组}" if is_container else "读取中..."
                 new_item = QTreeWidgetItem([display_name, child_type, val_display])
                 new_item.setData(0, Qt.ItemDataRole.UserRole, current_path_accumulator)
                 
                 if current_parent is None: tree.addTopLevelItem(new_item)
-                else: current_parent.addChild(new_node if 'new_node' in locals() else new_item)
+                else: current_parent.addChild(new_item)
                 found_child = new_item
             current_parent = found_child
 
@@ -1424,12 +1665,13 @@ class MCUStudioWindow(QMainWindow):
 class HighSpeedSamplingWorker(QThread):
     data_received = pyqtSignal(list)
 
-    def __init__(self, config, active_channels, sample_delay, jlink_instance=None):
+    def __init__(self, config, active_channels, sample_delay, jlink_instance=None, elf_db=None):
         super().__init__()
         self.config = config
         self.channels = active_channels 
         self.sample_delay = sample_delay
         self.jlink = jlink_instance
+        self.elf_db = elf_db
         self.running = True
         self.is_link_alive = False  
 
@@ -1438,11 +1680,17 @@ class HighSpeedSamplingWorker(QThread):
         parsed_channels = []
         for ch_idx, (addr_hex, v_type, path) in self.channels.items():
             addr_int = int(addr_hex, 16)
+            info = None
+            if self.elf_db and not path.startswith(("0x", "0X")):
+                try: info = self.elf_db.resolve(path)[1]
+                except Exception: pass
             norm_type = v_type.replace("_t", "").strip().lower()
-            width = 1 if "int8" in norm_type or "char" in norm_type else (2 if "int16" in norm_type else 4)
+            width = scalar_size(info) if info else (1 if "int8" in norm_type or "char" in norm_type else (2 if "int16" in norm_type else 4))
+            encoding = int(info.get("encoding", 0) or 0) if info else 0
             parsed_channels.append({
                 'ch_idx': ch_idx, 'addr': addr_int, 'width': width, 
-                'is_float': "float" in norm_type, 'is_signed': "int" in norm_type and "uint" not in norm_type
+                'is_float': encoding == 0x04 if info else "float" in norm_type,
+                'is_signed': encoding in (0x05, 0x06) if info else "int" in norm_type and "uint" not in norm_type
             })
 
         if self.config.backend_mode == "OPENOCD":
@@ -1453,7 +1701,7 @@ class HighSpeedSamplingWorker(QThread):
                 addrs = [c['addr'] for c in parsed_channels]
                 block_start, block_end = min(addrs) & ~0x3, (max(addrs) + 7) & ~0x3
                 word_count = (block_end - block_start) // 4
-                use_block_read = (block_end - block_start) <= 128 and len(parsed_channels) > 1
+                use_block_read = (block_end - block_start) <= 128 and len(parsed_channels) > 1 and all(c['width'] <= 4 for c in parsed_channels)
                 merged_cmd = f"mdw {hex(block_start)} {word_count}\x1a" if use_block_read else " ; ".join([f"{'mdb' if c['width']==1 else ('mdh' if c['width']==2 else 'mdw')} {hex(c['addr'])}" for c in parsed_channels]) + "\x1a"
                 merged_cmd_bytes = merged_cmd.encode('utf-8')
 

@@ -7,7 +7,9 @@ import time
 import struct
 import sqlite3
 import os
-import psutil
+import xml.etree.ElementTree as ET
+import tempfile
+import shutil
 import bisect
 import platform  
 import numpy as np 
@@ -74,6 +76,63 @@ POPUP_MENU_STYLE = """
 
 MAX_ARRAY_ELEMENTS = 4096
 MAX_TYPE_DEPTH = 24
+TCL_TERMINATOR = b"\x1a"
+
+
+def receive_tcl_response(sock, chunk_size=4096):
+    """Read one complete OpenOCD TCL response, including fragmented packets."""
+    chunks = bytearray()
+    while TCL_TERMINATOR not in chunks:
+        block = sock.recv(chunk_size)
+        if not block:
+            raise ConnectionError("OpenOCD TCL connection closed")
+        chunks.extend(block)
+    return bytes(chunks).split(TCL_TERMINATOR, 1)[0].decode("utf-8", errors="replace").strip()
+
+
+def launch_openocd(config):
+    """Start only the configured OpenOCD instance and retain its process handle."""
+    startupinfo = subprocess.STARTUPINFO()
+    creationflags = 0
+    if config.show_log_window:
+        creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+    else:
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    config.openocd_process = subprocess.Popen(
+        [config.openocd_exe] + config.get_openocd_args(),
+        startupinfo=startupinfo,
+        creationflags=creationflags,
+    )
+    return config.openocd_process
+
+
+def stop_managed_openocd(config):
+    process = getattr(config, "openocd_process", None)
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=1.0)
+    finally:
+        config.openocd_process = None
+
+
+def decode_sample_value(raw_value, channel):
+    width = channel["width"]
+    if channel["is_float"]:
+        if width == 8:
+            return struct.unpack("<d", int(raw_value).to_bytes(8, "little"))[0]
+        return struct.unpack("<f", struct.pack("<I", int(raw_value) & 0xFFFFFFFF))[0]
+    bits = width * 8
+    value = int(raw_value) & ((1 << bits) - 1)
+    if channel["is_signed"] and value & (1 << (bits - 1)):
+        value -= 1 << bits
+    return float(value)
 
 
 def type_label(type_info: Dict[str, Any]) -> str:
@@ -236,12 +295,19 @@ class ElfDatabase:
 
 class ElfVariableDialog(QDialog):
     symbol_selected_signal = pyqtSignal(str)
+    reload_requested_signal = pyqtSignal()
     def __init__(self, elf_db, parent=None):
         super().__init__(parent); self.elf_db = elf_db
         self.setWindowTitle("ELF 变量浏览器（符号表 + DWARF）"); self.resize(780, 620)
         layout = QVBoxLayout(self); self.search = QLineEdit(); self.search.setPlaceholderText("搜索 ELF 全局变量…"); layout.addWidget(self.search)
+        self.elf_status = QLabel(); layout.addWidget(self.elf_status)
         self.tree = QTreeWidget(); self.tree.setColumnCount(3); self.tree.setHeaderLabels(["变量", "DWARF 类型", "地址"]); self.tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); layout.addWidget(self.tree)
-        buttons = QHBoxLayout(); buttons.addStretch(); add = QPushButton("添加选中变量到监视"); add.clicked.connect(self._accept_item); buttons.addWidget(add); layout.addLayout(buttons)
+        buttons = QHBoxLayout()
+        reload_button = QPushButton("🔄 重新提取当前 ELF")
+        reload_button.setToolTip("重新读取当前 ELF 的符号表和 DWARF，并刷新已有监视变量的地址与结构")
+        reload_button.clicked.connect(lambda: self.reload_requested_signal.emit())
+        buttons.addWidget(reload_button); buttons.addStretch()
+        add = QPushButton("添加选中变量到监视"); add.clicked.connect(self._accept_item); buttons.addWidget(add); layout.addLayout(buttons)
         self.search.textChanged.connect(self._fill); self.tree.itemDoubleClicked.connect(lambda *_: self._accept_item()); self._fill()
     def _fill(self):
         keyword = self.search.text().strip().lower(); self.tree.clear()
@@ -249,6 +315,13 @@ class ElfVariableDialog(QDialog):
             info = self.elf_db.types.get(name)
             if info is None or (keyword and keyword not in name.lower() and keyword not in type_label(info).lower()): continue
             item = QTreeWidgetItem([name, type_label(info), f"0x{self.elf_db.symbols[name]:08X}"]); item.setData(0, Qt.ItemDataRole.UserRole, name); self.tree.addTopLevelItem(item)
+        self.elf_status.setText(
+            f"ELF：{self.elf_db.path or '未加载'}  |  "
+            f"符号 {len(self.elf_db.symbols)} 个，DWARF 变量 {len(self.elf_db.types)} 个"
+        )
+    def replace_elf_database(self, elf_db):
+        self.elf_db = elf_db
+        self._fill()
     def _accept_item(self):
         item = self.tree.currentItem()
         if item: self.symbol_selected_signal.emit(item.data(0, Qt.ItemDataRole.UserRole)); self.close()
@@ -263,10 +336,12 @@ class ProjectConfig:
         self.target = ""     
         self.jlink_dll_dir = ""        
         self.jlink_device = "Cortex-M0+" 
+        self.jlink_connect_device = "Cortex-M0+"
         self.svd_path = ""             
         self.openocd_host = "127.0.0.1"
         self.tcl_port = 6666
         self.show_log_window = False  
+        self.openocd_process = None
 
     def get_openocd_args(self):
         exe_dir = os.path.dirname(self.openocd_exe) if self.openocd_exe else ""
@@ -334,6 +409,166 @@ class LiveWatchDB:
         row = self.cursor.fetchone()
         return row[0] if row else ""
 
+
+class JLinkDeviceDialog(QDialog):
+    """Device selector backed primarily by JFlash.exe's JLinkDevices.xml."""
+
+    device_selected = pyqtSignal(str, str)
+
+    def __init__(self, dll_dir, current_device="", parent=None):
+        super().__init__(parent)
+        self.dll_dir = os.path.dirname(dll_dir) if os.path.isfile(dll_dir) else dll_dir
+        self.devices = []
+        self.load_warnings = []
+        self.setWindowTitle("SEGGER J-Link 芯片选择")
+        self.resize(820, 650)
+
+        layout = QVBoxLayout(self)
+        filters = QHBoxLayout()
+        self.vendor_combo = QComboBox()
+        self.vendor_combo.setMinimumWidth(190)
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("搜索芯片型号，例如 STM32F103 / PY32F030…")
+        filters.addWidget(QLabel("厂商："))
+        filters.addWidget(self.vendor_combo)
+        filters.addWidget(QLabel("型号："))
+        filters.addWidget(self.search_edit, 1)
+        layout.addLayout(filters)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(6)
+        self.tree.setHeaderLabels(["厂商", "J-Link 芯片型号", "Flash 起始", "Flash 大小", "RAM 大小", "来源"])
+        self.tree.header().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.tree)
+
+        self.status = QLabel("正在读取 SEGGER 器件库…")
+        layout.addWidget(self.status)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("取消")
+        select = QPushButton("使用选中芯片")
+        cancel.clicked.connect(self.reject)
+        select.clicked.connect(self._choose)
+        buttons.addWidget(cancel)
+        buttons.addWidget(select)
+        layout.addLayout(buttons)
+
+        self.vendor_combo.currentTextChanged.connect(self._filter)
+        self.search_edit.textChanged.connect(self._filter)
+        self.tree.itemDoubleClicked.connect(lambda *_: self._choose())
+        try:
+            self._load_devices()
+            # Generic core names are valid J-Link fallbacks, but they are not
+            # actual entries users normally want to search in the MCU list.
+            if current_device and not current_device.upper().startswith("CORTEX-"):
+                self.search_edit.setText(current_device)
+        except Exception as exc:
+            self.status.setText(f"读取 J-Link 芯片库失败：{exc}")
+
+    @staticmethod
+    def _size_text(size):
+        size = int(size or 0)
+        if not size: return "-"
+        if size % (1024 * 1024) == 0: return f"{size // (1024 * 1024)} MB"
+        if size % 1024 == 0: return f"{size // 1024} KB"
+        return f"{size} B"
+
+    def _load_devices(self):
+        records = {}
+        xml_path = os.path.join(self.dll_dir, "JLinkDevices.xml")
+        if os.path.exists(xml_path):
+            try:
+                root = ET.parse(xml_path).getroot()
+                last_name = None
+                for element in root.iter():
+                    if element.tag == "ChipInfo":
+                        name = element.get("Name", "").strip()
+                        if not name: continue
+                        core = self._core_name(element.get("Core", ""))
+                        records[name.lower()] = [element.get("Vendor", "Unspecified"), name, 0, 0,
+                                                 self._parse_int(element.get("WorkRAMSize")), "JLinkDevices.xml", core]
+                        last_name = name.lower()
+                    elif element.tag == "FlashBankInfo" and last_name in records:
+                        record = records[last_name]
+                        if not record[2]: record[2] = self._parse_int(element.get("BaseAddr"))
+                        record[3] += self._parse_int(element.get("MaxSize"))
+            except Exception as exc:
+                self.load_warnings.append(f"XML: {exc}")
+        else:
+            self.load_warnings.append(f"未找到 {xml_path}")
+
+        # The DLL list supplements devices that are not present in the XML.
+        if pylink is not None:
+            is_64bit = "64" in platform.architecture()[0]
+            candidates = ["JLink_x64.dll", "JLinkARM.dll"] if is_64bit else ["JLinkARM.dll", "JLink_x64.dll"]
+            dll_file = next((os.path.join(self.dll_dir, name) for name in candidates if os.path.exists(os.path.join(self.dll_dir, name))), None)
+            if dll_file:
+                try:
+                    link = pylink.JLink(lib=pylink.library.Library(dllpath=dll_file))
+                    for index in range(link.num_supported_devices()):
+                        info = link.supported_device(index)
+                        key = info.name.lower()
+                        if key not in records:
+                            records[key] = [info.manufacturer or "Unspecified", info.name, int(info.FlashAddr),
+                                            int(info.FlashSize), int(info.RAMSize), "J-Link DLL", info.name]
+                        else:
+                            # Exact DLL support is preferred for connecting; XML-only
+                            # extension devices fall back to their declared CPU core.
+                            records[key][5] = "JLinkDevices.xml + DLL"
+                            records[key][6] = info.name
+                except Exception as exc:
+                    self.load_warnings.append(f"DLL: {exc}")
+            else:
+                self.load_warnings.append("当前目录没有 JLink_x64.dll/JLinkARM.dll")
+        if not records:
+            raise RuntimeError(f"未找到器件数据库：{xml_path}")
+        self.devices = list(records.values())
+        vendors = sorted({record[0] for record in self.devices}, key=str.lower)
+        self.vendor_combo.blockSignals(True)
+        self.vendor_combo.addItem("全部厂商")
+        self.vendor_combo.addItems(vendors)
+        self.vendor_combo.blockSignals(False)
+        self._filter()
+
+    @staticmethod
+    def _parse_int(value):
+        try: return int(value or "0", 0)
+        except (TypeError, ValueError): return 0
+
+    @staticmethod
+    def _core_name(value):
+        core = (value or "").replace("JLINK_CORE_", "").replace("_", "-")
+        aliases = {"CORTEX-M0": "Cortex-M0", "CORTEX-M0+": "Cortex-M0+", "CORTEX-M1": "Cortex-M1",
+                   "CORTEX-M3": "Cortex-M3", "CORTEX-M4": "Cortex-M4", "CORTEX-M7": "Cortex-M7",
+                   "CORTEX-M23": "Cortex-M23", "CORTEX-M33": "Cortex-M33", "CORTEX-M55": "Cortex-M55"}
+        return aliases.get(core, core.title() if core else "")
+
+    def _filter(self):
+        vendor = self.vendor_combo.currentText()
+        keyword = self.search_edit.text().strip().lower()
+        self.tree.clear()
+        shown = 0
+        for manufacturer, name, flash_addr, flash_size, ram_size, source, connect_name in self.devices:
+            if vendor and vendor != "全部厂商" and manufacturer != vendor: continue
+            if keyword and keyword not in name.lower(): continue
+            item = QTreeWidgetItem([manufacturer, name, f"0x{flash_addr:08X}" if flash_addr else "-",
+                                    self._size_text(flash_size), self._size_text(ram_size), source])
+            item.setData(0, Qt.ItemDataRole.UserRole, (name, connect_name or name))
+            self.tree.addTopLevelItem(item)
+            shown += 1
+        xml_count = sum(record[5].startswith("JLinkDevices.xml") for record in self.devices)
+        xml_path = os.path.join(self.dll_dir, "JLinkDevices.xml")
+        warning = f" | 警告: {'; '.join(self.load_warnings)}" if self.load_warnings else ""
+        self.status.setText(f"共 {len(self.devices)} 个型号（XML {xml_count} 个），当前显示 {shown} 个 | {xml_path}{warning}")
+
+    def _choose(self):
+        item = self.tree.currentItem()
+        if not item: return
+        name, connect_name = item.data(0, Qt.ItemDataRole.UserRole)
+        self.device_selected.emit(name, connect_name)
+        self.accept()
+
 class LoginConfigDialog(QDialog):
     def __init__(self, db):
         super().__init__()
@@ -375,15 +610,24 @@ class LoginConfigDialog(QDialog):
 
         self.lbl_jl_dev = QLabel("🎯 芯片特定型号 (Device):")
         self.jlink_device_edit = QLineEdit("Cortex-M0+")
+        self.jlink_device_edit.textEdited.connect(lambda text: self.jlink_device_edit.setProperty("connect_device", text.strip()))
+        self.btn_jl_device = QPushButton("选择芯片…")
+        self.btn_jl_device.clicked.connect(self.open_jlink_device_selector)
+        self.h_jl_device = QHBoxLayout(); self.h_jl_device.addWidget(self.jlink_device_edit); self.h_jl_device.addWidget(self.btn_jl_device)
 
-        self.lbl_jl_svd = QLabel("📋 寄存器映射描述 (.svd):")
+        self.lbl_jl_svd = QLabel("📋 SVD（可选，仅用于外设寄存器名称）:")
         self.svd_edit = QLineEdit()
+        self.svd_edit.setPlaceholderText("可留空：不影响 ELF 烧录、DWARF 变量或波形调试")
+        self.svd_edit.setToolTip("SVD 只描述外设寄存器名称/位域；J-Link Flash 算法来自所选 DLL/XML，与 SVD 无关。")
         self.btn_svd = QPushButton("...")
         self.btn_svd.clicked.connect(lambda: self.select_file(self.svd_edit, "选择外设 SVD 描述文件", "SVD Files (*.svd *.txt)"))
-        self.h_jl_svd = QHBoxLayout(); self.h_jl_svd.addWidget(self.svd_edit); self.h_jl_svd.addWidget(self.btn_svd)
+        self.btn_clear_svd = QPushButton("清空")
+        self.btn_clear_svd.setToolTip("清除上一颗芯片遗留的 SVD；不影响烧录和调试")
+        self.btn_clear_svd.clicked.connect(self.svd_edit.clear)
+        self.h_jl_svd = QHBoxLayout(); self.h_jl_svd.addWidget(self.svd_edit); self.h_jl_svd.addWidget(self.btn_svd); self.h_jl_svd.addWidget(self.btn_clear_svd)
 
         form.addRow(self.lbl_jl_dir, self.h_jl_dir)
-        form.addRow(self.lbl_jl_dev, self.jlink_device_edit)
+        form.addRow(self.lbl_jl_dev, self.h_jl_device)
         form.addRow(self.lbl_jl_svd, self.h_jl_svd)
 
         self.lbl_ocd_exe = QLabel("🚀 OpenOCD 路径 (openocd.exe):")
@@ -436,8 +680,10 @@ class LoginConfigDialog(QDialog):
         self.jlink_dir_edit.setEnabled(is_jlink)
         self.btn_jl_dir.setEnabled(is_jlink)
         self.jlink_device_edit.setEnabled(is_jlink)
+        self.btn_jl_device.setEnabled(is_jlink)
         self.svd_edit.setEnabled(is_jlink)
         self.btn_svd.setEnabled(is_jlink)
+        self.btn_clear_svd.setEnabled(is_jlink)
 
         self.openocd_edit.setEnabled(not is_jlink)
         self.btn_ocd.setEnabled(not is_jlink)
@@ -476,6 +722,24 @@ class LoginConfigDialog(QDialog):
             self.jlink_dir_edit.setText(os.path.normpath(path))
             self.static_env_check()
 
+    def open_jlink_device_selector(self):
+        dll_dir = self.jlink_dir_edit.text().strip()
+        dialog = JLinkDeviceDialog(dll_dir, self.jlink_device_edit.text().strip(), self)
+        dialog.device_selected.connect(self.apply_jlink_device_selection)
+        dialog.exec()
+
+    def apply_jlink_device_selection(self, display_name, connect_name):
+        previous_device = self.jlink_device_edit.text().strip()
+        self.jlink_device_edit.setText(display_name)
+        self.jlink_device_edit.setProperty("connect_device", connect_name)
+        if connect_name != display_name:
+            self.jlink_device_edit.setToolTip(f"XML 扩展器件；实时调试按内核 {connect_name} 连接")
+        else:
+            self.jlink_device_edit.setToolTip("")
+        if previous_device and previous_device.casefold() != display_name.casefold() and self.svd_edit.text().strip():
+            self.svd_edit.clear()
+            self.svd_edit.setPlaceholderText(f"已从 {previous_device} 切换到 {display_name}；旧 SVD 已清除（SVD 不影响烧录）")
+
     def select_cfg_file(self, combo, subfolder):
         exe_path = self.openocd_edit.text().strip()
         initial_dir = ""
@@ -490,6 +754,7 @@ class LoginConfigDialog(QDialog):
         self.openocd_edit.setText(self.db.get_config("openocd_exe"))
         self.jlink_dir_edit.setText(self.db.get_config("jlink_dll_dir", "C:\\Program Files\\SEGGER\\JLink"))
         self.jlink_device_edit.setText(self.db.get_config("jlink_device", "Cortex-M0+"))
+        self.jlink_device_edit.setProperty("connect_device", self.db.get_config("jlink_connect_device", self.jlink_device_edit.text()))
         self.svd_edit.setText(self.db.get_config("svd_path"))
         
         saved_mode = self.db.get_config("backend_mode", "JLINK")
@@ -518,26 +783,18 @@ class LoginConfigDialog(QDialog):
             self.db.save_config("last_interface_cfg", self.config.interface)
             self.db.save_config("last_target_cfg", self.config.target)
 
-            for proc in psutil.process_iter(['name']):
-                if proc.info['name'] and 'openocd' in proc.info['name'].lower():
-                    try: proc.kill()
-                    except: pass
-            time.sleep(0.15)
-            
             if self.config.openocd_exe and os.path.exists(self.config.openocd_exe):
-                cmd = [self.config.openocd_exe] + self.config.get_openocd_args()
-                si = subprocess.STARTUPINFO()
-                if not self.config.show_log_window:
-                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    si.wShowWindow = subprocess.SW_HIDE
-                subprocess.Popen(cmd, startupinfo=si, creationflags=subprocess.CREATE_NEW_CONSOLE)
+                stop_managed_openocd(self.config)
+                launch_openocd(self.config)
                 time.sleep(0.5)
         else: 
             self.config.jlink_dll_dir = self.jlink_dir_edit.text().strip()
             self.config.jlink_device = self.jlink_device_edit.text().strip()
+            self.config.jlink_connect_device = self.jlink_device_edit.property("connect_device") or self.config.jlink_device
             self.config.svd_path = self.svd_edit.text().strip()
             self.db.save_config("jlink_dll_dir", self.config.jlink_dll_dir)
             self.db.save_config("jlink_device", self.config.jlink_device)
+            self.db.save_config("jlink_connect_device", self.config.jlink_connect_device)
             self.db.save_config("svd_path", self.config.svd_path)
 
         self.is_connected = True
@@ -571,6 +828,134 @@ class InPlaceEditLineEdit(QLineEdit):
     def focusOutEvent(self, event):
         self.editing_finished_signal.emit(self.text().strip())
         super().focusOutEvent(event)
+
+
+class ElfFlashWorker(QThread):
+    """Run J-Link Commander and reconnect without blocking the Qt GUI."""
+
+    finished_signal = pyqtSignal(bool, str, object)
+
+    def __init__(self, commander, jlink_dir, elf_path, flash_device, connect_device, loader_config=None, parent=None):
+        super().__init__(parent)
+        self.commander = commander
+        self.jlink_dir = jlink_dir
+        self.elf_path = elf_path
+        self.flash_device = flash_device
+        self.connect_device = connect_device
+        self.loader_config = loader_config
+
+    def _reconnect_without_reset(self):
+        if pylink is None: return None
+        is_64bit = "64" in platform.architecture()[0]
+        candidates = ["JLink_x64.dll", "JLinkARM.dll"] if is_64bit else ["JLinkARM.dll", "JLink_x64.dll"]
+        dll_file = next((os.path.join(self.jlink_dir, name) for name in candidates
+                         if os.path.isfile(os.path.join(self.jlink_dir, name))), None)
+        link = pylink.JLink(lib=pylink.library.Library(dllpath=dll_file)) if dll_file else pylink.JLink()
+        link.open()
+        link.set_tif(pylink.enums.JLinkInterfaces.SWD)
+        link.connect(self.connect_device, speed=4000)
+        return link
+
+    def run(self):
+        script_path = ""
+        device_xml_dir = ""
+        run_commander = self.commander
+        command_device = self.flash_device
+        success = False
+        message = ""
+        link = None
+        try:
+            if self.loader_config:
+                device_xml_dir = tempfile.mkdtemp(prefix="mcu_studio_jlink_device_")
+                temporary_device_name = f"MCUStudio_{self.flash_device}"
+                command_device = temporary_device_name
+                database = ET.Element("Database")
+                device = ET.SubElement(database, "Device")
+                ET.SubElement(device, "ChipInfo", {
+                    "Vendor": self.loader_config["vendor"],
+                    "Name": temporary_device_name,
+                    "WorkRAMAddr": hex(self.loader_config["ram_addr"]),
+                    "WorkRAMSize": hex(self.loader_config["ram_size"]),
+                    "Core": self.loader_config["core"],
+                })
+                ET.SubElement(device, "FlashBankInfo", {
+                    "Name": self.loader_config["flash_name"],
+                    "BaseAddr": hex(self.loader_config["flash_addr"]),
+                    "MaxSize": hex(self.loader_config["flash_size"]),
+                    "Loader": self.loader_config["loader_path"],
+                    "LoaderType": self.loader_config["loader_type"],
+                    "AlwaysPresent": "1",
+                })
+                ET.ElementTree(database).write(
+                    os.path.join(device_xml_dir, "JLinkDevices.xml"),
+                    encoding="utf-8", xml_declaration=True,
+                )
+                # J-Link V7.22b reads JLinkDevices.xml only while the DLL is
+                # starting. A command string issued later is too late. Launch
+                # an isolated copy of the configured C-drive Commander/DLL so
+                # it sees the corrected one-device XML at process startup.
+                run_commander = os.path.join(device_xml_dir, "JLink.exe")
+                shutil.copy2(self.commander, run_commander)
+                dll_source = os.path.join(self.jlink_dir, "JLinkARM.dll")
+                if not os.path.isfile(dll_source):
+                    raise FileNotFoundError(f"找不到 JLinkARM.dll：{dll_source}")
+                shutil.copy2(dll_source, os.path.join(device_xml_dir, "JLinkARM.dll"))
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".jlink", encoding="utf-8", newline="\n", delete=False
+            ) as script:
+                script_path = script.name
+                # Reset commands are permitted only because this worker is
+                # created by an explicitly confirmed Flash button action.
+                script.write("r\n")
+                script.write(f'loadfile "{self.elf_path}"\n')
+                script.write("r\n")
+                script.write("qc\n")
+            creationflags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+            process_env = os.environ.copy()
+            process_env["PATH"] = self.jlink_dir + os.pathsep + process_env.get("PATH", "")
+            command = [run_commander, "-device", command_device]
+            command.extend([
+                "-if", "SWD",
+                "-speed", "4000",
+                "-autoconnect", "1",
+                "-ExitOnError", "1",
+                "-CommanderScript", script_path,
+            ])
+            result = subprocess.run(
+                command,
+                cwd=device_xml_dir or self.jlink_dir,
+                env=process_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                timeout=180,
+                creationflags=creationflags,
+            )
+            output = result.stdout or ""
+            failed = result.returncode != 0 or any(
+                token in output.lower() for token in ("error:", "failed to", "cannot connect")
+            )
+            if failed:
+                message = output[-4000:] or f"JLink.exe 退出码：{result.returncode}"
+            else:
+                success = True
+                message = f"ELF 已烧录并复位运行：\n{self.elf_path}"
+        except subprocess.TimeoutExpired:
+            message = "J-Link 烧录超过 180 秒，已停止等待。"
+        except Exception as exc:
+            message = str(exc)
+        finally:
+            if script_path:
+                try: os.remove(script_path)
+                except OSError: pass
+            if device_xml_dir:
+                shutil.rmtree(device_xml_dir, ignore_errors=True)
+            try:
+                link = self._reconnect_without_reset()
+            except Exception as exc:
+                message += f"\n\n烧录后非复位重连失败：{exc}"
+            self.finished_signal.emit(success, message, link)
 
 
 class AdvanceCParserDialog(QDialog):
@@ -618,6 +1003,7 @@ class MCUStudioWindow(QMainWindow):
         self.elf_db = ElfDatabase()
         self.symbol_cache = {}
         self.worker = None 
+        self.elf_reload_in_progress = False
         self.jlink_native_instance = None 
         self.openocd_link_alive = False  
         
@@ -637,6 +1023,8 @@ class MCUStudioWindow(QMainWindow):
         self.start_time = time.time()          
         self.max_display_duration_ms = 5000    
         self.is_frozen = False
+        self.canvas_adapt_start_ms = None
+        self.canvas_fixed_ranges = [None, None, None]
         self.tcl_socket = None
         self.heartbeat_state = False
 
@@ -691,7 +1079,7 @@ class MCUStudioWindow(QMainWindow):
                     
                 self.jlink_native_instance.open()
                 self.jlink_native_instance.set_tif(pylink.enums.JLinkInterfaces.SWD)
-                self.jlink_native_instance.connect(self.config.jlink_device, speed=4000)
+                self.jlink_native_instance.connect(self.config.jlink_connect_device, speed=4000)
                 print("⚡ 原生 J-Link 内核握手成功！")
             except Exception as e:
                 self.jlink_native_instance = None
@@ -707,6 +1095,79 @@ class MCUStudioWindow(QMainWindow):
             print(f"⚡ ELF 符号表加载成功，共包含 {len(self.symbol_cache)} 个有效全局变量。")
         except Exception as e:
             print(f"❌ ELF 符号表加载异常: {e}")
+
+    def reload_elf_symbols(self, show_message=True, source="manual"):
+        """Atomically reload ELF/DWARF and refresh saved trees and channel addresses."""
+        elf_path = os.path.abspath(self.config.elf_path) if self.config.elf_path else ""
+        if not os.path.isfile(elf_path):
+            error = f"找不到 ELF：\n{elf_path or '(未设置)'}"
+            if show_message: QMessageBox.warning(self, "重新提取 ELF 失败", error)
+            return False, error
+
+        try:
+            refreshed = ElfDatabase()
+            refreshed.load(elf_path)
+        except Exception as exc:
+            error = f"ELF 解析失败，已保留原来的变量数据：\n{exc}"
+            if show_message: QMessageBox.critical(self, "重新提取 ELF 失败", error)
+            return False, error
+
+        if hasattr(self, 'worker') and self.worker:
+            self.worker.stop()
+            self.worker = None
+
+        self.elf_reload_in_progress = True
+        try:
+            self.elf_db = refreshed
+            self.symbol_cache = dict(refreshed.symbols)
+
+            # Symbols removed by the new firmware must not keep stale addresses.
+            for path, _v_type, _offset, base_var, tab_idx in list(self.db.get_all_vars()):
+                if not base_var.startswith(("0x", "0X")) and base_var not in self.symbol_cache:
+                    self.db.delete_var(path, tab_idx)
+
+            for tab_index in range(self.tab_widget.count()):
+                tree = self.tab_widget.widget(tab_index)
+                if tree: tree.clear()
+            self.load_history_from_db()
+
+            current_rows = {row[0]: row for row in self.db.get_all_vars()}
+            for ch_idx, path in enumerate(list(self.ch_paths)):
+                row = current_rows.get(path) if path else None
+                if row is None:
+                    if path:
+                        for active in self.plot_active_paths:
+                            if path in active: active.remove(path)
+                        for plot_idx, curves in enumerate(self.plot_curves_dict):
+                            curve = curves.pop(path, None)
+                            if curve is not None:
+                                try: self.plot_widgets[plot_idx].removeItem(curve)
+                                except Exception: pass
+                    self.ch_paths[ch_idx] = self.ch_types[ch_idx] = self.ch_addrs[ch_idx] = None
+                else:
+                    _name, v_type, offset, base_var, _tab_idx = row
+                    base_address = int(base_var, 16) if base_var.startswith(("0x", "0X")) else self.symbol_cache.get(base_var)
+                    if base_address is None:
+                        self.ch_paths[ch_idx] = self.ch_types[ch_idx] = self.ch_addrs[ch_idx] = None
+                    else:
+                        self.ch_types[ch_idx] = v_type
+                        self.ch_addrs[ch_idx] = hex(base_address + offset)
+                self.ch_buffers[ch_idx] = []
+                self.ch_time_stamps[ch_idx] = []
+
+            if hasattr(self, 'adv_parse_dialog') and self.adv_parse_dialog:
+                try: self.adv_parse_dialog.replace_elf_database(refreshed)
+                except RuntimeError: self.adv_parse_dialog = None
+            self.refresh_ui_channel_bar()
+            self.reset_canvas_adapt_ranges()
+        finally:
+            self.elf_reload_in_progress = False
+
+        self.restart_sampling_thread()
+        summary = f"已重新提取 ELF：{len(refreshed.symbols)} 个符号，{len(refreshed.types)} 个 DWARF 变量。"
+        self.lbl_status_text.setText("ELF 已自动重新提取" if source == "flash" else "ELF 已重新提取")
+        if show_message: QMessageBox.information(self, "重新提取 ELF 完成", summary)
+        return True, summary
 
     def type_info_for_path(self, path):
         if path.startswith(("0x", "0X")): return None
@@ -779,13 +1240,8 @@ class MCUStudioWindow(QMainWindow):
     def send_tcl_cmd(self, cmd):
         if not self.tcl_socket or not self.openocd_link_alive: return "ERROR"
         try:
-            self.tcl_socket.setblocking(False)
-            try:
-                while self.tcl_socket.recv(128): pass
-            except: pass
-            self.tcl_socket.setblocking(True)
             self.tcl_socket.sendall(f"{cmd}\x1a".encode('utf-8'))
-            res = self.tcl_socket.recv(1024).decode('utf-8').replace('\x1a', '').strip()
+            res = receive_tcl_response(self.tcl_socket)
             if "ERROR" in res: raise Exception()
             return res
         except: 
@@ -831,6 +1287,13 @@ class MCUStudioWindow(QMainWindow):
         
         self.btn_freeze = QPushButton("❄️ 锁定时间滚动")
         self.btn_freeze.clicked.connect(self.toggle_freeze)
+
+        self.btn_canvas_adapt = QPushButton("🎯 一键自适应画布")
+        self.btn_canvas_adapt.setToolTip("采集 2 秒数据，按最大/最小值将 X、Y 显示跨度扩展为 2 倍")
+        self.btn_canvas_adapt.clicked.connect(self.start_canvas_auto_adapt)
+        self.canvas_adapt_timer = QTimer(self)
+        self.canvas_adapt_timer.setSingleShot(True)
+        self.canvas_adapt_timer.timeout.connect(self.finish_canvas_auto_adapt)
         
         self.btn_reconnect = QPushButton("🔌 重启通信后端")
         self.btn_reconnect.clicked.connect(self.force_reconnect_engine)
@@ -839,13 +1302,21 @@ class MCUStudioWindow(QMainWindow):
         self.btn_mcu_reset.setStyleSheet("background-color: #4a1515; color: #ff8a80;")
         self.btn_mcu_reset.clicked.connect(self.trigger_manual_mcu_reset)
 
+        self.btn_flash = QPushButton("⚡ 烧录 ELF")
+        self.btn_flash.setStyleSheet("background-color: #5d3b00; color: #ffd54f;")
+        self.btn_flash.setToolTip("只有点击并确认后才会擦写 Flash/复位；普通调试不复位 MCU")
+        self.btn_flash.clicked.connect(self.flash_elf_by_user)
+        self.btn_flash.setEnabled(self.config.backend_mode == "JLINK")
+
         top.addWidget(QLabel("📊 采样速率:"))
         top.addWidget(self.wave_hz_combo)
         top.addWidget(self.custom_hz_edit)
         top.addWidget(self.btn_freeze)
+        top.addWidget(self.btn_canvas_adapt)
         
         top.addSpacing(10) 
         top.addWidget(self.btn_reconnect) 
+        top.addWidget(self.btn_flash)
         top.addWidget(self.btn_mcu_reset) 
         top.addStretch()
         
@@ -1032,7 +1503,79 @@ class MCUStudioWindow(QMainWindow):
                 if self.hover_dots[i]: self.hover_dots[i].setVisible(False)
                 if self.hover_labels[i]: self.hover_labels[i].setVisible(False)
 
+    @staticmethod
+    def _double_span_limits(minimum, maximum):
+        minimum, maximum = float(minimum), float(maximum)
+        span = maximum - minimum
+        if not np.isfinite(span) or span <= 0:
+            half_span = max(abs(minimum) * 0.1, 1.0)
+            return minimum - half_span, maximum + half_span
+        center = (minimum + maximum) / 2.0
+        return center - span, center + span
+
+    def start_canvas_auto_adapt(self):
+        if not any(self.ch_paths):
+            QMessageBox.information(self, "一键自适应画布", "请先把至少一个变量绑定到波形通道。")
+            return
+        self.reset_canvas_adapt_ranges()
+        self.canvas_adapt_start_ms = (time.time() - self.start_time) * 1000.0
+        self.btn_canvas_adapt.setEnabled(False)
+        self.btn_canvas_adapt.setText("⏳ 正在统计 2 秒范围…")
+        self.lbl_status_text.setText("正在采样画布自适应范围")
+        self.canvas_adapt_timer.start(2000)
+
+    def finish_canvas_auto_adapt(self):
+        start_ms = self.canvas_adapt_start_ms
+        self.canvas_adapt_start_ms = None
+        adapted = 0
+        with QMutexLocker(self.buffer_mutex):
+            for plot_idx in range(3):
+                x_values, y_values = [], []
+                for path in self.plot_active_paths[plot_idx]:
+                    try: channel_idx = self.ch_paths.index(path)
+                    except ValueError: continue
+                    timestamps = self.ch_time_stamps[channel_idx]
+                    values = self.ch_buffers[channel_idx]
+                    if not timestamps or not values: continue
+                    first = bisect.bisect_left(timestamps, start_ms) if start_ms is not None else 0
+                    count = min(len(timestamps), len(values))
+                    if first >= count: continue
+                    x_arr = np.asarray(timestamps[first:count], dtype=float)
+                    y_arr = np.asarray(values[first:count], dtype=float)
+                    finite = np.isfinite(x_arr) & np.isfinite(y_arr)
+                    if finite.any():
+                        x_values.append(x_arr[finite])
+                        y_values.append(y_arr[finite])
+                if not x_values: continue
+                all_x, all_y = np.concatenate(x_values), np.concatenate(y_values)
+                x_lower, x_upper = self._double_span_limits(np.min(all_x), np.max(all_x))
+                y_lower, y_upper = self._double_span_limits(np.min(all_y), np.max(all_y))
+                self.canvas_fixed_ranges[plot_idx] = (x_lower, x_upper, y_lower, y_upper)
+                self.plot_widgets[plot_idx].setXRange(x_lower, x_upper, padding=0)
+                self.plot_widgets[plot_idx].setYRange(y_lower, y_upper, padding=0)
+                adapted += 1
+        self.btn_canvas_adapt.setEnabled(True)
+        self.btn_canvas_adapt.setText("🎯 一键自适应画布")
+        if adapted:
+            self.lbl_status_text.setText(f"已自适应 {adapted} 个画布（X/Y 跨度 ×2）")
+        else:
+            self.lbl_status_text.setText("画布自适应失败：观察期间没有有效数据")
+            QMessageBox.warning(self, "一键自适应画布", "2 秒观察期间没有采集到有效波形数据。")
+
+    def reset_canvas_adapt_ranges(self):
+        self.canvas_fixed_ranges = [None, None, None]
+        for plot_widget in getattr(self, 'plot_widgets', []):
+            try: plot_widget.getViewBox().enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+            except Exception: pass
+
     def trigger_manual_mcu_reset(self):
+        answer = QMessageBox.question(
+            self, "确认复位 MCU",
+            "这是唯一的手动复位操作。\n\n确定要立即复位并运行 MCU 吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes: return
         self._execute_flash_animation(self.btn_mcu_reset, "#e53935", "color: #ff8a80;")
         if self.config.backend_mode == "OPENOCD":
             if self.openocd_link_alive and self.tcl_socket:
@@ -1048,19 +1591,132 @@ class MCUStudioWindow(QMainWindow):
                 except: pass
         self.force_reconnect_engine()
 
+    def flash_elf_by_user(self):
+        if self.config.backend_mode != "JLINK":
+            QMessageBox.warning(self, "无法烧录", "当前不是 J-Link 模式。")
+            return
+        elf_path = os.path.abspath(self.config.elf_path)
+        jlink_dir = os.path.dirname(self.config.jlink_dll_dir) if os.path.isfile(self.config.jlink_dll_dir) else self.config.jlink_dll_dir
+        commander = os.path.join(jlink_dir, "JLink.exe")
+        device = self.config.jlink_device
+        loader_config, loader_error = self.find_flash_loader_config(jlink_dir, device)
+        if not os.path.isfile(elf_path):
+            QMessageBox.warning(self, "无法烧录", f"找不到 ELF：\n{elf_path}")
+            return
+        if not os.path.isfile(commander):
+            QMessageBox.warning(self, "无法烧录", f"找不到与 J-Flash 同目录的 JLink.exe：\n{commander}")
+            return
+        if loader_error:
+            QMessageBox.warning(self, "无法烧录", loader_error)
+            return
+        answer = QMessageBox.warning(
+            self, "确认烧录 ELF",
+            f"芯片：{device}\nELF：{elf_path}\n\n"
+            "烧录会擦写 Flash，并在完成后复位运行 MCU。\n"
+            "普通连接、采样和重连不会执行此操作。\n\n确定继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes: return
+
+        self.btn_flash.setEnabled(False)
+        self.btn_flash.setText("⏳ 正在烧录…")
+        self.lbl_status_text.setText("正在烧录 ELF（界面仍可响应）")
+        if hasattr(self, 'worker') and self.worker:
+            self.worker.stop(); self.worker = None
+        if self.jlink_native_instance:
+            try: self.jlink_native_instance.close()
+            except Exception: pass
+            self.jlink_native_instance = None
+        self.flash_worker = ElfFlashWorker(
+            commander, jlink_dir, elf_path, device, self.config.jlink_connect_device, loader_config, self
+        )
+        self.flash_worker.finished_signal.connect(self.handle_flash_finished)
+        self.flash_worker.start()
+
+    @staticmethod
+    def find_flash_loader_config(jlink_dir, device_name):
+        """Build a corrected one-device XML configuration for an extension MCU."""
+        xml_path = os.path.join(jlink_dir, "JLinkDevices.xml")
+        if not os.path.isfile(xml_path): return None, ""
+        try:
+            root = ET.parse(xml_path).getroot()
+        except Exception as exc:
+            return None, f"无法解析器件库：\n{xml_path}\n\n{exc}"
+        chip_attrs = None
+        flash_attrs = None
+        for device in root.iter("Device"):
+            chip = device.find("ChipInfo")
+            if chip is None or chip.get("Name", "").casefold() != device_name.casefold(): continue
+            flash = device.find("FlashBankInfo")
+            chip_attrs = dict(chip.attrib)
+            flash_attrs = dict(flash.attrib) if flash is not None else None
+            break
+        if not chip_attrs or not flash_attrs or not flash_attrs.get("Loader"):
+            # DLL-only devices manage their algorithms internally.
+            return None, ""
+
+        loader = flash_attrs["Loader"].strip()
+        normalized = loader.replace("/", os.sep).replace("\\", os.sep)
+        direct = os.path.normpath(os.path.join(jlink_dir, normalized))
+        loader_path = direct if os.path.isfile(direct) else ""
+
+        basename = os.path.basename(normalized)
+        matches = []
+        if not loader_path:
+            devices_root = os.path.join(jlink_dir, "Devices")
+            if os.path.isdir(devices_root):
+                for root_dir, _dirs, files in os.walk(devices_root):
+                    for filename in files:
+                        if filename.casefold() == basename.casefold(): matches.append(os.path.join(root_dir, filename))
+        if len(matches) == 1: loader_path = matches[0]
+        elif len(matches) > 1:
+            # Prefer a directory whose path contains the selected device family.
+            family = re.match(r"[A-Za-z]+\d+", device_name)
+            if family:
+                preferred = [path for path in matches if family.group(0).casefold() in path.casefold()]
+                if len(preferred) == 1: loader_path = preferred[0]
+            if not loader_path:
+                return None, f"Flash 算法 {basename} 存在多个同名文件，无法唯一确定：\n" + "\n".join(matches)
+        if not loader_path:
+            return None, f"芯片 {device_name} 需要 Flash 算法：\n{loader}\n\n但在当前 J-Link 目录下未找到：\n{jlink_dir}"
+        config = {
+            "vendor": chip_attrs.get("Vendor", "Custom"),
+            "ram_addr": int(chip_attrs.get("WorkRAMAddr", "0"), 0),
+            "ram_size": int(chip_attrs.get("WorkRAMSize", "0"), 0),
+            "core": chip_attrs.get("Core", "JLINK_CORE_CORTEX_M0"),
+            "flash_name": flash_attrs.get("Name", "Internal Flash"),
+            "flash_addr": int(flash_attrs.get("BaseAddr", "0"), 0),
+            "flash_size": int(flash_attrs.get("MaxSize", "0"), 0),
+            "loader_path": os.path.abspath(loader_path),
+            "loader_type": flash_attrs.get("LoaderType", "FLASH_ALGO_TYPE_OPEN"),
+        }
+        return config, ""
+
+    def handle_flash_finished(self, success, message, link):
+        self.jlink_native_instance = link
+        self.btn_flash.setText("⚡ 烧录 ELF")
+        self.btn_flash.setEnabled(self.config.backend_mode == "JLINK")
+        self.lbl_status_text.setText("烧录完成" if success else "烧录失败")
+        if success:
+            reload_ok, reload_message = self.reload_elf_symbols(show_message=False, source="flash")
+            message += f"\n\n{'✓' if reload_ok else '⚠'} {reload_message}"
+            QMessageBox.information(self, "烧录完成", message)
+        else:
+            self.restart_sampling_thread()
+            QMessageBox.critical(self, "烧录失败", message)
+
     def force_reconnect_engine(self):
         self._execute_flash_animation(self.btn_reconnect, "#00b0ff", "")
         if self.config.backend_mode == "OPENOCD":
             if self.tcl_socket: 
                 try: self.tcl_socket.close()
                 except: pass
-            for proc in psutil.process_iter(['name']):
-                if proc.info['name'] and 'openocd' in proc.info['name'].lower(): 
-                    try: proc.kill()
-                    except: pass
+            self.tcl_socket = None
+            self.openocd_link_alive = False
+            stop_managed_openocd(self.config)
             time.sleep(0.2)
-            cmd = [self.config.openocd_exe] + self.config.get_openocd_args()
-            subprocess.Popen(cmd, startupinfo=subprocess.STARTINFO(), creationflags=subprocess.CREATE_NEW_CONSOLE)
+            launch_openocd(self.config)
             time.sleep(0.6)
         self.init_global_link_backend()
         self.restart_sampling_thread()
@@ -1172,7 +1828,18 @@ class MCUStudioWindow(QMainWindow):
                 
             try:  
                 if not pw.getPlotItem().scene(): continue
-                if ch_idx != -1 and self.ch_time_stamps[ch_idx]:
+                fixed_range = self.canvas_fixed_ranges[i]
+                if fixed_range is not None:
+                    # Keep the adapted X span, but anchor it to the newest
+                    # sample so the time axis continues scrolling.
+                    x_span = max(fixed_range[1] - fixed_range[0], 1.0)
+                    if ch_idx != -1 and self.ch_time_stamps[ch_idx]:
+                        max_x = self.ch_time_stamps[ch_idx][-1]
+                    else:
+                        max_x = (time.time() - self.start_time) * 1000.0
+                    min_x = max_x - x_span
+                    pw.setXRange(min_x, max_x, padding=0)
+                elif ch_idx != -1 and self.ch_time_stamps[ch_idx]:
                     max_x = self.ch_time_stamps[ch_idx][-1]  
                     min_x = max_x - self.max_display_duration_ms
                     pw.setXRange(min_x, max_x, padding=0)
@@ -1354,6 +2021,7 @@ class MCUStudioWindow(QMainWindow):
         if path not in self.plot_active_paths[ch_idx]: self.plot_active_paths[ch_idx].append(path)
         
         self.refresh_ui_channel_bar()
+        self.reset_canvas_adapt_ranges()
         self.restart_sampling_thread()
 
     def unbind_channel(self, ch_idx):
@@ -1373,6 +2041,7 @@ class MCUStudioWindow(QMainWindow):
         self.ch_buffers[ch_idx] = []
         self.ch_time_stamps[ch_idx] = []
         self.refresh_ui_channel_bar()
+        self.reset_canvas_adapt_ranges()
         self.restart_sampling_thread()
 
     def refresh_ui_channel_bar(self):
@@ -1403,11 +2072,11 @@ class MCUStudioWindow(QMainWindow):
         self.input_name.clear()
 
     def open_advance_parser_window(self):
-        if not self.elf_db.types:
-            QMessageBox.warning(self, "ELF 类型信息", "当前 ELF 中没有可用的 DWARF 变量类型，请确保编译时带 -g。")
-            return
         self.adv_parse_dialog = ElfVariableDialog(self.elf_db, self)
         self.adv_parse_dialog.symbol_selected_signal.connect(self.add_elf_variable)
+        self.adv_parse_dialog.reload_requested_signal.connect(
+            lambda: self.reload_elf_symbols(show_message=True, source="manual")
+        )
         self.adv_parse_dialog.show()
 
     def add_elf_variable(self, root):
@@ -1500,6 +2169,7 @@ class MCUStudioWindow(QMainWindow):
         self.restart_sampling_thread()
         
     def restart_sampling_thread(self):
+        if getattr(self, 'elf_reload_in_progress', False): return
         if hasattr(self, 'worker') and self.worker:
             self.worker.stop(); self.worker = None
             
@@ -1638,7 +2308,8 @@ class MCUStudioWindow(QMainWindow):
         is_alive = False
         if self.config.backend_mode == "OPENOCD":
             worker_alive = hasattr(self, 'worker') and self.worker and self.worker.isRunning() and self.worker.is_link_alive
-            is_alive = worker_alive and self.openocd_link_alive
+            has_worker = hasattr(self, 'worker') and self.worker and self.worker.isRunning()
+            is_alive = self.openocd_link_alive and (not has_worker or worker_alive)
         else: is_alive = True if (self.jlink_native_instance and self.jlink_native_instance.target_connected()) else False
 
         if is_alive:
@@ -1652,9 +2323,16 @@ class MCUStudioWindow(QMainWindow):
             self.lbl_status_text.setStyleSheet("color: #d32f2f; font-family: 'Microsoft YaHei'; font-size: 11px; font-weight: bold;")
 
     def closeEvent(self, event):
+        if hasattr(self, 'flash_worker') and self.flash_worker and self.flash_worker.isRunning():
+            QMessageBox.information(self, "正在烧录", "Flash 烧录尚未完成，为避免中断导致芯片无法启动，请等待烧录结束。")
+            event.ignore()
+            return
         if hasattr(self, 'worker') and self.worker: self.worker.stop()
         if self.tcl_socket:
             try: self.tcl_socket.close()
+            except: pass
+        if self.config.backend_mode == "OPENOCD":
+            try: stop_managed_openocd(self.config)
             except: pass
         if self.jlink_native_instance:
             try: self.jlink_native_instance.close()
@@ -1702,16 +2380,27 @@ class HighSpeedSamplingWorker(QThread):
                 block_start, block_end = min(addrs) & ~0x3, (max(addrs) + 7) & ~0x3
                 word_count = (block_end - block_start) // 4
                 use_block_read = (block_end - block_start) <= 128 and len(parsed_channels) > 1 and all(c['width'] <= 4 for c in parsed_channels)
-                merged_cmd = f"mdw {hex(block_start)} {word_count}\x1a" if use_block_read else " ; ".join([f"{'mdb' if c['width']==1 else ('mdh' if c['width']==2 else 'mdw')} {hex(c['addr'])}" for c in parsed_channels]) + "\x1a"
+                def read_command(channel):
+                    width = channel['width']
+                    if width == 1: return f"mdb {hex(channel['addr'])}"
+                    if width == 2: return f"mdh {hex(channel['addr'])}"
+                    if width == 4: return f"mdw {hex(channel['addr'])}"
+                    return f"mdb {hex(channel['addr'])} {width}"
+                merged_cmd = f"mdw {hex(block_start)} {word_count}\x1a" if use_block_read else " ; ".join(read_command(c) for c in parsed_channels) + "\x1a"
                 merged_cmd_bytes = merged_cmd.encode('utf-8')
 
+            def connect_openocd():
+                candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                candidate.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                candidate.settimeout(0.3)
+                candidate.connect((self.config.openocd_host, self.config.tcl_port))
+                return candidate
+
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                s.settimeout(0.3)
-                s.connect((self.config.openocd_host, self.config.tcl_port))
+                s = connect_openocd()
                 self.is_link_alive = True
-            except: self.is_link_alive = False
+            except Exception:
+                self.is_link_alive = False
 
         local_batch = []
         last_flush_time = time.time()
@@ -1721,10 +2410,19 @@ class HighSpeedSamplingWorker(QThread):
             packet = {}
             if self.config.backend_mode == "OPENOCD":
                 if not merged_cmd_bytes or not self.is_link_alive:
-                    time.sleep(0.04); continue
+                    if not merged_cmd_bytes:
+                        time.sleep(0.04); continue
+                    try:
+                        if s: s.close()
+                        s = connect_openocd()
+                        self.is_link_alive = True
+                    except Exception:
+                        self.is_link_alive = False
+                        time.sleep(0.25)
+                        continue
                 try:
                     s.sendall(merged_cmd_bytes)
-                    res = s.recv(2048).decode('utf-8').replace('\x1a', '').strip()
+                    res = receive_tcl_response(s)
                     if "ERROR" in res: raise Exception()
                     lines = [l.strip() for l in res.split('\n') if l.strip()]
                     
@@ -1737,22 +2435,32 @@ class HighSpeedSamplingWorker(QThread):
                             shift = ((c['addr'] - block_start) % 4) * 8
                             if idx < len(words):
                                 raw_val = (words[idx] >> shift) & ((1 << (c['width']*8)) - 1)
-                                packet[c['ch_idx']] = struct.unpack('<f', struct.pack('<I', raw_val))[0] if c['is_float'] else float(raw_val - 256 if c['is_signed'] and c['width']==1 and raw_val>=128 else (raw_val - 65536 if c['is_signed'] and c['width']==2 and raw_val>=32768 else raw_val))
+                                packet[c['ch_idx']] = decode_sample_value(raw_val, c)
                     else:
                         for i, c in enumerate(parsed_channels):
                             if i < len(lines):
-                                raw_int = int(lines[i].split(":")[-1].strip(), 16)
-                                packet[c['ch_idx']] = struct.unpack('<f', struct.pack('<I', raw_int))[0] if c['is_float'] else float(raw_int)
-                except: 
-                    self.is_link_alive = False; continue
+                                tokens = lines[i].split(":")[-1].strip().split()
+                                if c['width'] > 4:
+                                    raw_int = int.from_bytes(bytes(int(token, 16) & 0xFF for token in tokens[:c['width']]), "little")
+                                else:
+                                    raw_int = int(tokens[0], 16)
+                                packet[c['ch_idx']] = decode_sample_value(raw_int, c)
+                except Exception:
+                    self.is_link_alive = False
+                    if s:
+                        try: s.close()
+                        except Exception: pass
+                    s = None
+                    continue
             else:
                 if self.jlink and self.jlink.target_connected():
                     try:
                         for c in parsed_channels:
                             if c['width'] == 1: raw = self.jlink.memory_read8(c['addr'], 1)[0]
                             elif c['width'] == 2: raw = self.jlink.memory_read16(c['addr'], 1)[0]
-                            else: raw = self.jlink.memory_read32(c['addr'], 1)[0]
-                            packet[c['ch_idx']] = struct.unpack('<f', struct.pack('<I', raw))[0] if c['is_float'] else float(raw)
+                            elif c['width'] == 4: raw = self.jlink.memory_read32(c['addr'], 1)[0]
+                            else: raw = int.from_bytes(bytes(self.jlink.memory_read8(c['addr'], c['width'])), "little")
+                            packet[c['ch_idx']] = decode_sample_value(raw, c)
                     except: 
                         time.sleep(0.04); continue
                 else:
@@ -1771,6 +2479,11 @@ class HighSpeedSamplingWorker(QThread):
     def stop(self):
         self.running = False
         self.wait()
+
+
+
+
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

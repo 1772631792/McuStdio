@@ -1,4 +1,4 @@
-"""Build MCU Live Watch Studio with the repository's verified PyInstaller spec."""
+"""Build the main.py + mcu_studio package as a single Windows executable."""
 
 from __future__ import annotations
 
@@ -16,10 +16,23 @@ APP_NAME = "Mcu_Studio"
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+ENTRY_SCRIPT = PROJECT_ROOT / "main.py"
+PACKAGE_DIR = PROJECT_ROOT / "mcu_studio"
 SPEC_FILE = PROJECT_ROOT / "packaging" / "Mcu_Studio.spec"
+ICON_FILE = PROJECT_ROOT / "assets" / "mcu_studio.ico"
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 BUILD_ROOT = ARTIFACTS_DIR / "build"
 DIST_DIR = PROJECT_ROOT / "dist"
+
+REQUIRED_SOURCE_FILES = (
+    ENTRY_SCRIPT,
+    PACKAGE_DIR / "__init__.py",
+    PACKAGE_DIR / "core.py",
+    PACKAGE_DIR / "workers.py",
+    PACKAGE_DIR / "ui.py",
+    SPEC_FILE,
+    ICON_FILE,
+)
 
 OTHER_QT_BINDINGS = (
     "PySide6",
@@ -39,6 +52,27 @@ def validate_app_name(name: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
         raise ValueError("APP_NAME may contain only letters, numbers, '.', '_' and '-'")
     return name
+
+
+def validate_project_layout() -> None:
+    """Fail early when the maintained source layout is incomplete."""
+    missing = [path.relative_to(PROJECT_ROOT) for path in REQUIRED_SOURCE_FILES if not path.is_file()]
+    if missing:
+        missing_text = ", ".join(str(path) for path in missing)
+        raise FileNotFoundError(f"Missing required project files: {missing_text}")
+
+
+def validate_output_available(executable: Path) -> None:
+    """Report a running/locked previous build before PyInstaller does expensive work."""
+    if not executable.exists():
+        return
+    try:
+        with executable.open("ab"):
+            pass
+    except PermissionError as exc:
+        raise RuntimeError(
+            f"Cannot replace {executable.name}; close the running packaged application first."
+        ) from exc
 
 
 def run_command(command: list[str], env: dict[str, str]) -> None:
@@ -80,21 +114,24 @@ def inspect_archive(executable: Path, env: dict[str, str]) -> None:
 
 def main() -> int:
     app_name = validate_app_name(APP_NAME)
-    if not SPEC_FILE.is_file():
-        raise FileNotFoundError(f"Missing PyInstaller spec: {SPEC_FILE}")
+    validate_project_layout()
+
+    executable = DIST_DIR / f"{app_name}.exe"
+    validate_output_available(executable)
 
     env = os.environ.copy()
     env["MCU_STUDIO_APP_NAME"] = app_name
+    env["MCU_STUDIO_ENTRY_SCRIPT"] = str(ENTRY_SCRIPT)
     env["PYQTGRAPH_QT_LIB"] = "PyQt6"
     env["QT_API"] = "pyqt6"
 
     work_dir = BUILD_ROOT / app_name
-    executable = DIST_DIR / f"{app_name}.exe"
     command = [
         sys.executable,
         "-m",
         "PyInstaller",
         "--noconfirm",
+        "--clean",
         "--workpath",
         str(work_dir),
         "--distpath",
@@ -107,7 +144,8 @@ def main() -> int:
         raise FileNotFoundError(f"PyInstaller did not create: {executable}")
 
     inspect_archive(executable, env)
-    print(f"\nBuild succeeded: {executable}")
+    print(f"\nEntry point: {ENTRY_SCRIPT}")
+    print(f"Build succeeded: {executable}")
     print("Qt audit passed: PyQt6 only.")
     return 0
 

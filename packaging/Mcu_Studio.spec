@@ -3,7 +3,10 @@
 import os
 
 project_root = os.path.abspath(os.path.join(SPECPATH, '..'))
-entry_script = os.path.join(project_root, 'live_set.py')
+entry_script = os.environ.get(
+    'MCU_STUDIO_ENTRY_SCRIPT',
+    os.path.join(project_root, 'main.py'),
+)
 icon_file = os.path.join(project_root, 'assets', 'mcu_studio.ico')
 app_name = os.environ.get('MCU_STUDIO_APP_NAME', 'Mcu_Studio')
 

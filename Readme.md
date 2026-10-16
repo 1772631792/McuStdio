@@ -22,7 +22,7 @@ MCU Live Watch Studio 是一个面向 Cortex-M 单片机的实时变量观测工
 
 ```powershell
 python -m pip install PyQt6 pyqtgraph numpy pyelftools pylink-square
-python .\live_set.py
+python .\main.py
 ```
 
 启动后：
@@ -45,9 +45,13 @@ python .\live_set.py
 
 ```text
 McuStdio/
-├─ live_set.py              # 唯一应用入口
+├─ main.py                  # 唯一应用运行入口
 ├─ build.py                 # 打包入口，可设置 EXE 名称
 ├─ README.md
+├─ mcu_studio/             # 应用实现（核心数据、后台线程、界面）
+│  ├─ core.py
+│  ├─ workers.py
+│  └─ ui.py
 ├─ assets/                 # 图标等静态资源
 ├─ live_watch_history.db   # 运行数据，与入口/可执行文件同级
 ├─ runtime/                # 跟随 Git 发布的 OpenOCD、ARM GCC、cfg 和 SVD
@@ -69,7 +73,7 @@ python -m pip install pyinstaller
 python .\build.py
 ```
 
-`build.py` 只使用 `packaging/Mcu_Studio.spec`，强制选择 PyQt6，并排除 PySide6、PyQt5 及其绑定库。打包后还会自动检查 EXE 内容；如果发现第二套 Qt，脚本会报错退出。历史 spec 仅存放在 `doc/archive/packaging/`，不要用于发布。
+`build.py` 会检查 `main.py`、`mcu_studio/` 模块、图标和 spec 是否齐全，然后只使用 `packaging/Mcu_Studio.spec` 构建。它强制选择 PyQt6，并排除 PySide6、PyQt5 及其绑定库；打包后还会自动检查 EXE 内容，发现第二套 Qt 时直接报错。若旧版 EXE 正在运行，脚本会在构建前提示关闭，避免等待很久后才因文件占用失败。历史 spec 仅存放在 `doc/archive/packaging/`，不要用于发布。
 
 打包成品输出到项目根目录的 `dist/`，例如 `dist/Mcu_Studio.exe`。PyInstaller 中间文件仍保存在 `artifacts/build/`。
 

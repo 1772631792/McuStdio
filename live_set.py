@@ -48,31 +48,68 @@ except ImportError:
 DARK_STYLE = """
     QWidget { background-color: #1a1a1a; color: #e0e0e0; font-family: "Microsoft YaHei", "Consolas"; font-size: 12px; }
     QDialog, QMainWindow { background-color: #121212; }
-    QLineEdit, QComboBox, QCheckBox, QTextEdit { background-color: #242424; border: 1px solid #333333; padding: 5px; color: #ffffff; border-radius: 6px; }
-    QLineEdit:focus, QComboBox:focus, QTextEdit:focus { border: 1px solid #1e88e5; background-color: #2a2a2a; }
-    QPushButton { background-color: #2d2d2d; border: 1px solid #424242; padding: 5px 12px; color: #ffffff; border-radius: 6px; font-weight: 500; }
-    QPushButton:hover { background-color: #3d3d3d; border: 1px solid #525252; }
-    QPushButton:disabled { background-color: #1f1f1f; color: #444444; border: 1px solid #222222; }
-    QLineEdit:disabled, QComboBox:disabled { background-color: #1a1a1a; color: #555555; border: 1px solid #222222; }
+    QLabel { background-color: transparent; }
+    QLineEdit, QComboBox, QCheckBox, QTextEdit { background-color: #242424; border: 1px solid #3f3f46; padding: 5px; color: #ffffff; border-radius: 6px; }
+    QLineEdit:focus, QComboBox:focus, QTextEdit:focus { border: 1px solid #42a5f5; background-color: #2a2a2a; }
+    QPushButton { background-color: #2d2d2d; border: 1px solid #4b5563; padding: 5px 12px; color: #ffffff; border-radius: 6px; font-weight: 500; }
+    QPushButton:hover { background-color: #3d3d3d; border: 1px solid #60a5fa; }
+    QPushButton:pressed { background-color: #1e3a5f; }
+    QPushButton:disabled { background-color: #1f1f1f; color: #666666; border: 1px solid #2d2d2d; }
+    QLineEdit:disabled, QComboBox:disabled { background-color: #1a1a1a; color: #666666; border: 1px solid #2d2d2d; }
     QTreeWidget { background-color: #161616; border: 1px solid #2d2d2d; border-radius: 8px; alternate-background-color: #1c1c1c; }
     QTreeWidget::item { height: 26px; border-bottom: 1px solid #222222; }
     QTreeWidget::item:hover { background-color: #262626; }
     QTreeWidget::item:selected { background-color: #0d47a1; color: #ffffff; }
-    QHeaderView::section { background-color: #222222; color: #90a4ae; padding: 6px; border: 1px solid #121212; font-weight: bold; }
-    QSplitter::handle { background-color: #252525; }
-    QTreeWidget QLineEdit { background-color: #2c2c2c !important; border: 2px solid #1e88e5 !important; color: #ffffff !important; font-family: "Consolas" !important; font-size: 12px !important; font-weight: bold !important; padding: 1px 3px; }
-    
+    QHeaderView::section { background-color: #222222; color: #b0bec5; padding: 6px; border: 1px solid #121212; font-weight: bold; }
+    QSplitter::handle { background-color: #303030; }
+    QTreeWidget QLineEdit { background-color: #2c2c2c !important; border: 2px solid #42a5f5 !important; color: #ffffff !important; font-family: "Consolas" !important; font-size: 12px !important; font-weight: bold !important; padding: 1px 3px; }
     QTabWidget::pane { border: 1px solid #2d2d2d; background-color: #161616; border-radius: 8px; top: -1px; }
-    QTabBar::tab { background-color: #222222; color: #888888; border: 1px solid #2d2d2d; padding: 6px 15px; border-top-left-radius: 6px; border-top-right-radius: 6px; font-weight: bold; margin-right: 2px; }
-    QTabBar::tab:selected { background-color: #161616; color: #1e88e5; border-bottom-color: #161616; border-top: 2px solid #1e88e5; }
+    QTabBar::tab { background-color: #222222; color: #a3a3a3; border: 1px solid #2d2d2d; padding: 6px 15px; border-top-left-radius: 6px; border-top-right-radius: 6px; font-weight: bold; margin-right: 2px; }
+    QTabBar::tab:selected { background-color: #161616; color: #64b5f6; border-bottom-color: #161616; border-top: 2px solid #42a5f5; }
+    QToolTip { background-color: #2d2d2d; color: #ffffff; border: 1px solid #64748b; padding: 4px; }
+"""
+
+LIGHT_STYLE = """
+    QWidget { background-color: #f7f9fc; color: #1f2937; font-family: "Microsoft YaHei", "Consolas"; font-size: 12px; }
+    QDialog, QMainWindow { background-color: #ffffff; }
+    QLabel { background-color: transparent; }
+    QLineEdit, QComboBox, QCheckBox, QTextEdit { background-color: #ffffff; border: 1px solid #cbd5e1; padding: 5px; color: #111827; border-radius: 6px; }
+    QLineEdit:focus, QComboBox:focus, QTextEdit:focus { border: 1px solid #1976d2; background-color: #ffffff; }
+    QPushButton { background-color: #ffffff; border: 1px solid #cbd5e1; padding: 5px 12px; color: #1f2937; border-radius: 6px; font-weight: 500; }
+    QPushButton:hover { background-color: #eef6ff; border: 1px solid #60a5fa; }
+    QPushButton:pressed { background-color: #dbeafe; }
+    QPushButton:disabled { background-color: #f1f5f9; color: #94a3b8; border: 1px solid #e2e8f0; }
+    QLineEdit:disabled, QComboBox:disabled { background-color: #f1f5f9; color: #94a3b8; border: 1px solid #e2e8f0; }
+    QTreeWidget { background-color: #ffffff; border: 1px solid #dbe3ec; border-radius: 8px; alternate-background-color: #f8fafc; }
+    QTreeWidget::item { height: 26px; border-bottom: 1px solid #edf2f7; }
+    QTreeWidget::item:hover { background-color: #eff6ff; }
+    QTreeWidget::item:selected { background-color: #dbeafe; color: #0f3f73; }
+    QHeaderView::section { background-color: #eef2f7; color: #475569; padding: 6px; border: 1px solid #dbe3ec; font-weight: bold; }
+    QSplitter::handle { background-color: #dbe3ec; }
+    QTreeWidget QLineEdit { background-color: #ffffff !important; border: 2px solid #1976d2 !important; color: #111827 !important; font-family: "Consolas" !important; font-size: 12px !important; font-weight: bold !important; padding: 1px 3px; }
+    QTabWidget::pane { border: 1px solid #dbe3ec; background-color: #ffffff; border-radius: 8px; top: -1px; }
+    QTabBar::tab { background-color: #eef2f7; color: #64748b; border: 1px solid #dbe3ec; padding: 6px 15px; border-top-left-radius: 6px; border-top-right-radius: 6px; font-weight: bold; margin-right: 2px; }
+    QTabBar::tab:selected { background-color: #ffffff; color: #1565c0; border-bottom-color: #ffffff; border-top: 2px solid #1976d2; }
+    QToolTip { background-color: #ffffff; color: #111827; border: 1px solid #94a3b8; padding: 4px; }
 """
 
 POPUP_MENU_STYLE = """
-    QMenu { background-color: #222222; color: #ffffff; border: 1px solid #444444; padding: 6px; font-family: "Microsoft YaHei", "Consolas"; font-size: 13px; font-weight: bold; }
-    QMenu::item { padding: 6px 28px 6px 16px; border-radius: 4px; background-color: transparent; color: #ffffff; }
-    QMenu::item:selected { background-color: #1e88e5; color: #ffffff; }
-    QMenu::separator { height: 1px; background-color: #444444; margin: 4px 0px; }
+    QMenu { background-color: #ffffff; color: #1f2937; border: 1px solid #cbd5e1; padding: 6px; font-family: "Microsoft YaHei", "Consolas"; font-size: 13px; font-weight: bold; }
+    QMenu::item { padding: 6px 28px 6px 16px; border-radius: 4px; background-color: transparent; color: #1f2937; }
+    QMenu::item:selected { background-color: #dbeafe; color: #0f3f73; }
+    QMenu::separator { height: 1px; background-color: #dbe3ec; margin: 4px 0px; }
 """
+
+DARK_POPUP_MENU_STYLE = """
+    QMenu { background-color: #222222; color: #ffffff; border: 1px solid #4b5563; padding: 6px; font-family: "Microsoft YaHei", "Consolas"; font-size: 13px; font-weight: bold; }
+    QMenu::item { padding: 6px 28px 6px 16px; border-radius: 4px; background-color: transparent; color: #ffffff; }
+    QMenu::item:selected { background-color: #0d47a1; color: #ffffff; }
+    QMenu::separator { height: 1px; background-color: #4b5563; margin: 4px 0px; }
+"""
+
+
+def application_theme_stylesheet(theme_mode):
+    return LIGHT_STYLE if str(theme_mode).upper() == "LIGHT" else DARK_STYLE
 
 MAX_ARRAY_ELEMENTS = 4096
 MAX_TYPE_DEPTH = 24
@@ -229,15 +266,51 @@ class ElfDatabase:
         symbols, types = {}, {}
         with open(path, "rb") as stream:
             elf = ELFFile(stream)
+            allocated_ranges = [
+                (int(section.header.sh_addr), int(section.header.sh_addr) + int(section.header.sh_size))
+                for section in elf.iter_sections()
+                if int(section.header.sh_flags) & 0x2 and int(section.header.sh_size) > 0
+            ]
+
+            def address_is_allocated(address):
+                return any(start <= int(address) < end for start, end in allocated_ranges)
+
             for section in elf.iter_sections():
                 if section.header.sh_type not in ("SHT_SYMTAB", "SHT_DYNSYM"): continue
                 for symbol in section.iter_symbols():
                     entry = symbol.entry
-                    if entry["st_info"]["type"] == "STT_OBJECT" and symbol.name and int(entry["st_value"]):
+                    if (entry["st_info"]["type"] == "STT_OBJECT" and symbol.name and
+                            entry["st_shndx"] != "SHN_UNDEF" and address_is_allocated(entry["st_value"])):
                         symbols.setdefault(symbol.name, int(entry["st_value"]))
             if elf.has_dwarf_info():
                 dwarf = elf.get_dwarf_info(); self._expr_parser = DWARFExprParser(dwarf.structs); self._type_cache = {}
+
+                def variable_address(variable_die):
+                    location = variable_die.attributes.get("DW_AT_location")
+                    if location is None: return None
+                    try:
+                        if describe_form_class(location.form) not in ("exprloc", "block"): return None
+                        operations = self._expr_parser.parse_expr(location.value)
+                        address_op = next((op for op in operations if op.op_name == "DW_OP_addr"), None)
+                        return int(address_op.args[0]) if address_op and address_op.args else None
+                    except Exception:
+                        return None
+
+                def unique_storage_alias(variable_name, source_file, address):
+                    stem = os.path.splitext(os.path.basename(source_file or "static"))[0]
+                    stem = re.sub(r"\W+", "_", stem).strip("_") or "static"
+                    if stem[0].isdigit(): stem = f"file_{stem}"
+                    candidate = f"{stem}__{variable_name}"
+                    suffix = 2
+                    while candidate in symbols and symbols[candidate] != address:
+                        candidate = f"{stem}__{variable_name}_{suffix}"
+                        suffix += 1
+                    return candidate
+
                 for cu in dwarf.iter_CUs():
+                    top_die = cu.get_top_DIE()
+                    source_attr = top_die.attributes.get("DW_AT_name")
+                    source_file = os.path.basename(self._text(source_attr.value)) if source_attr else ""
                     for die in cu.iter_DIEs():
                         if die.tag != "DW_TAG_variable": continue
                         if die.attributes.get("DW_AT_declaration") and die.attributes["DW_AT_declaration"].value: continue
@@ -246,8 +319,27 @@ class ElfDatabase:
                         if not n: continue
                         variable_name = self._text(n.value)
                         type_die = die if "DW_AT_type" in die.attributes else declaration
-                        if variable_name in symbols and type_die is not None and "DW_AT_type" in type_die.attributes:
-                            types[variable_name] = self._parse_type(type_die.get_DIE_from_attribute("DW_AT_type"))
+                        if type_die is None or "DW_AT_type" not in type_die.attributes: continue
+                        address = variable_address(die)
+                        if address is None: address = symbols.get(variable_name)
+                        if address is None or not address_is_allocated(address): continue
+                        external = die.attributes.get("DW_AT_external") or (declaration.attributes.get("DW_AT_external") if declaration else None)
+                        is_static = not bool(external and external.value)
+                        storage_name = variable_name
+                        if variable_name in types and symbols.get(variable_name) != address:
+                            existing_type = types[variable_name]
+                            if not is_static and existing_type.get("is_static"):
+                                existing_alias = unique_storage_alias(
+                                    variable_name, existing_type.get("source_file", ""), symbols[variable_name]
+                                )
+                                symbols[existing_alias] = symbols[variable_name]
+                                types[existing_alias] = types.pop(variable_name)
+                            else:
+                                storage_name = unique_storage_alias(variable_name, source_file, address)
+                        variable_type = dict(self._parse_type(type_die.get_DIE_from_attribute("DW_AT_type")))
+                        variable_type.update({"is_static": is_static, "source_file": source_file, "original_name": variable_name})
+                        symbols[storage_name] = int(address)
+                        types[storage_name] = variable_type
         if not symbols: raise RuntimeError("ELF 中没有可用的全局数据符号")
         self.path, self.symbols, self.types = os.path.abspath(path), symbols, types
 
@@ -301,7 +393,7 @@ class ElfVariableDialog(QDialog):
         self.setWindowTitle("ELF 变量浏览器（符号表 + DWARF）"); self.resize(780, 620)
         layout = QVBoxLayout(self); self.search = QLineEdit(); self.search.setPlaceholderText("搜索 ELF 全局变量…"); layout.addWidget(self.search)
         self.elf_status = QLabel(); layout.addWidget(self.elf_status)
-        self.tree = QTreeWidget(); self.tree.setColumnCount(3); self.tree.setHeaderLabels(["变量", "DWARF 类型", "地址"]); self.tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); layout.addWidget(self.tree)
+        self.tree = QTreeWidget(); self.tree.setColumnCount(4); self.tree.setHeaderLabels(["变量", "DWARF 类型", "地址", "存储属性"]); self.tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); layout.addWidget(self.tree)
         buttons = QHBoxLayout()
         reload_button = QPushButton("🔄 重新提取当前 ELF")
         reload_button.setToolTip("重新读取当前 ELF 的符号表和 DWARF，并刷新已有监视变量的地址与结构")
@@ -313,8 +405,11 @@ class ElfVariableDialog(QDialog):
         keyword = self.search.text().strip().lower(); self.tree.clear()
         for name in sorted(self.elf_db.symbols):
             info = self.elf_db.types.get(name)
-            if info is None or (keyword and keyword not in name.lower() and keyword not in type_label(info).lower()): continue
-            item = QTreeWidgetItem([name, type_label(info), f"0x{self.elf_db.symbols[name]:08X}"]); item.setData(0, Qt.ItemDataRole.UserRole, name); self.tree.addTopLevelItem(item)
+            storage = "static" if info and info.get("is_static") else "global"
+            source_file = info.get("source_file", "") if info else ""
+            storage_text = f"{storage} · {source_file}" if source_file else storage
+            if info is None or (keyword and keyword not in name.lower() and keyword not in type_label(info).lower() and keyword not in storage_text.lower()): continue
+            item = QTreeWidgetItem([name, type_label(info), f"0x{self.elf_db.symbols[name]:08X}", storage_text]); item.setData(0, Qt.ItemDataRole.UserRole, name); self.tree.addTopLevelItem(item)
         self.elf_status.setText(
             f"ELF：{self.elf_db.path or '未加载'}  |  "
             f"符号 {len(self.elf_db.symbols)} 个，DWARF 变量 {len(self.elf_db.types)} 个"
@@ -342,6 +437,7 @@ class ProjectConfig:
         self.tcl_port = 6666
         self.show_log_window = False  
         self.openocd_process = None
+        self.theme_mode = "DARK"
 
     def get_openocd_args(self):
         exe_dir = os.path.dirname(self.openocd_exe) if self.openocd_exe else ""
@@ -576,7 +672,7 @@ class LoginConfigDialog(QDialog):
         self.config = ProjectConfig()
         self.is_connected = False
         self.setWindowTitle("MCU Studio - 启动配置工作站")
-        self.resize(680, 540)
+        self.resize(700, 590)
         self.init_ui()
         self.load_saved_config()
         self.toggle_engine_fields()
@@ -588,6 +684,11 @@ class LoginConfigDialog(QDialog):
     def init_ui(self):
         layout = QVBoxLayout()
         form = QFormLayout()
+
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["🌙 夜间模式（默认）", "☀️ 白天模式"])
+        self.theme_combo.currentIndexChanged.connect(self.apply_selected_theme)
+        form.addRow("🎨 界面主题:", self.theme_combo)
         
         self.elf_edit = QLineEdit()
         btn_elf = QPushButton("...")
@@ -663,7 +764,7 @@ class LoginConfigDialog(QDialog):
         layout.addSpacing(10)
         
         self.lbl_hardware_status = QLabel("🔍 准备就绪。")
-        self.lbl_hardware_status.setStyleSheet("color: #ffb300; font-weight: bold; padding: 5px;")
+        self.lbl_hardware_status.setStyleSheet("color: #b45309; font-weight: bold; padding: 5px;")
         layout.addWidget(self.lbl_hardware_status)
         
         btns = QHBoxLayout()
@@ -694,23 +795,36 @@ class LoginConfigDialog(QDialog):
         self.log_checkbox.setEnabled(not is_jlink)
         self.static_env_check()
 
+    def apply_selected_theme(self):
+        theme_mode = "LIGHT" if self.theme_combo.currentIndex() == 1 else "DARK"
+        self.config.theme_mode = theme_mode
+        app = QApplication.instance()
+        if app: app.setStyleSheet(application_theme_stylesheet(theme_mode))
+        self.db.save_config("theme_mode", theme_mode)
+        if hasattr(self, 'lbl_hardware_status'): self.static_env_check()
+
     def static_env_check(self):
         is_jlink_mode = (self.driver_mode_combo.currentIndex() == 0)
+        is_dark = self.config.theme_mode == "DARK"
+        error_color = "#ff6b6b" if is_dark else "#c62828"
+        success_color = "#69db7c" if is_dark else "#2e7d32"
+        info_color = "#64b5f6" if is_dark else "#0277bd"
+        warning_color = "#ffd166" if is_dark else "#b45309"
         if is_jlink_mode:
             if pylink is None:
                 self.lbl_hardware_status.setText("❌ 未检测到 pylink 库，请执行 pip install pylink-square")
-                self.lbl_hardware_status.setStyleSheet("color: #e53935; font-weight: bold;")
+                self.lbl_hardware_status.setStyleSheet(f"color: {error_color}; font-weight: bold;")
             else:
                 self.lbl_hardware_status.setText("🟢 J-Link 原生运行环境就绪。")
-                self.lbl_hardware_status.setStyleSheet("color: #00E676; font-weight: bold;")
+                self.lbl_hardware_status.setStyleSheet(f"color: {success_color}; font-weight: bold;")
         else:
             exe = self.openocd_edit.text().strip()
             if exe and os.path.exists(exe):
                 self.lbl_hardware_status.setText("🟡 OpenOCD 工具路径就绪。")
-                self.lbl_hardware_status.setStyleSheet("color: #00E5FF; font-weight: bold;")
+                self.lbl_hardware_status.setStyleSheet(f"color: {info_color}; font-weight: bold;")
             else:
                 self.lbl_hardware_status.setText("⚠️ OpenOCD 路径待完善，可直接进入面板。")
-                self.lbl_hardware_status.setStyleSheet("color: #ffb300; font-weight: bold;")
+                self.lbl_hardware_status.setStyleSheet(f"color: {warning_color}; font-weight: bold;")
 
     def select_file(self, edit, title, flt):
         path, _ = QFileDialog.getOpenFileName(self, title, "", flt)
@@ -756,6 +870,9 @@ class LoginConfigDialog(QDialog):
         self.jlink_device_edit.setText(self.db.get_config("jlink_device", "Cortex-M0+"))
         self.jlink_device_edit.setProperty("connect_device", self.db.get_config("jlink_connect_device", self.jlink_device_edit.text()))
         self.svd_edit.setText(self.db.get_config("svd_path"))
+        saved_theme = self.db.get_config("theme_mode", "DARK").upper()
+        self.theme_combo.setCurrentIndex(1 if saved_theme == "LIGHT" else 0)
+        self.apply_selected_theme()
         
         saved_mode = self.db.get_config("backend_mode", "JLINK")
         self.driver_mode_combo.setCurrentIndex(0 if saved_mode == "JLINK" else 1)
@@ -769,9 +886,11 @@ class LoginConfigDialog(QDialog):
         if hasattr(self, 'detect_timer'): self.detect_timer.stop()
         self.config.elf_path = self.elf_edit.text().strip()
         self.config.backend_mode = "JLINK" if self.driver_mode_combo.currentIndex() == 0 else "OPENOCD"
+        self.config.theme_mode = "LIGHT" if self.theme_combo.currentIndex() == 1 else "DARK"
         
         self.db.save_config("elf_path", self.config.elf_path)
         self.db.save_config("backend_mode", self.config.backend_mode)
+        self.db.save_config("theme_mode", self.config.theme_mode)
 
         if self.config.backend_mode == "OPENOCD":
             self.config.openocd_exe = self.openocd_edit.text().strip()
@@ -958,6 +1077,27 @@ class ElfFlashWorker(QThread):
             self.finished_signal.emit(success, message, link)
 
 
+class BackendCloseWorker(QThread):
+    """Release a native probe handle without ever blocking the Qt GUI thread."""
+
+    finished_signal = pyqtSignal(str)
+
+    def __init__(self, link, parent=None):
+        super().__init__(parent)
+        self.link = link
+
+    def run(self):
+        error = ""
+        try:
+            if self.link:
+                self.link.close()
+        except Exception as exc:
+            error = str(exc)
+        finally:
+            self.link = None
+            self.finished_signal.emit(error)
+
+
 class AdvanceCParserDialog(QDialog):
     def __init__(self, db, parent=None):
         super().__init__(parent)
@@ -975,7 +1115,7 @@ class AdvanceCParserDialog(QDialog):
         btn_cancel = QPushButton("取消")
         btn_cancel.clicked.connect(self.reject)
         btn_run = QPushButton("🔍 智能树化解析并同步至全局主表")
-        btn_run.setStyleSheet("background-color: #1e88e5; font-weight: bold; padding: 6px 16px;")
+        btn_run.setStyleSheet("background-color: #1976d2; color: white; font-weight: bold; padding: 6px 16px;")
         btn_run.clicked.connect(self.do_parse)
         
         btns.addStretch()
@@ -997,12 +1137,33 @@ class MCUStudioWindow(QMainWindow):
         super().__init__()
         self.config = config
         self.db = db
+        self.is_dark_theme = getattr(config, 'theme_mode', 'DARK').upper() == 'DARK'
+        self.theme_colors = ({
+            'plot_bg': '#111111', 'axis': '#b0bec5', 'axis_text': '#e0e0e0',
+            'crosshair': '#90a4ae', 'hover_pen': '#ffffff', 'hover_text': '#ffffff',
+            'hover_fill': '#263238', 'splitter': '#303030', 'panel': '#161616',
+            'panel_border': '#303030', 'neutral_button': '#2d2d2d',
+            'neutral_text': '#ffffff', 'status_ok': '#69db7c',
+            'channels': ['#00E676', '#FFD600', '#00E5FF'],
+        } if self.is_dark_theme else {
+            'plot_bg': '#ffffff', 'axis': '#64748b', 'axis_text': '#374151',
+            'crosshair': '#64748b', 'hover_pen': '#1f2937', 'hover_text': '#111827',
+            'hover_fill': '#f1f5f9', 'splitter': '#dbe3ec', 'panel': '#ffffff',
+            'panel_border': '#dbe3ec', 'neutral_button': '#ffffff',
+            'neutral_text': '#1f2937', 'status_ok': '#2e7d32',
+            'channels': ['#008a3b', '#d97706', '#0284c7'],
+        })
+        self.popup_menu_style = DARK_POPUP_MENU_STYLE if self.is_dark_theme else POPUP_MENU_STYLE
         self.setWindowTitle(f"MCU Live Watch Studio - [{'原生J-Link独占' if config.backend_mode=='JLINK' else 'OpenOCD驱动'}]")
         self.resize(1450, 850)
         
         self.elf_db = ElfDatabase()
         self.symbol_cache = {}
         self.worker = None 
+        self.retired_workers = []
+        self.backend_close_workers = []
+        self.backend_suspended = False
+        self.flash_sequence_active = False
         self.elf_reload_in_progress = False
         self.jlink_native_instance = None 
         self.openocd_link_alive = False  
@@ -1048,7 +1209,19 @@ class MCUStudioWindow(QMainWindow):
 
         self.load_history_from_db()
 
+        # Watch the selected ELF itself (not its project directory).  Requiring
+        # the same changed signature twice avoids parsing while the linker is
+        # still replacing/writing the file.
+        self.elf_last_signature = self._elf_file_signature()
+        self.elf_pending_signature = None
+        self.elf_pending_stable_ticks = 0
+        self.elf_watch_timer = QTimer(self)
+        self.elf_watch_timer.timeout.connect(self.check_elf_file_changed)
+        self.elf_watch_timer.start(1000)
+
     def init_global_link_backend(self):
+        if self.backend_suspended:
+            return
         if self.config.backend_mode == "OPENOCD":
             try:
                 self.tcl_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1112,9 +1285,7 @@ class MCUStudioWindow(QMainWindow):
             if show_message: QMessageBox.critical(self, "重新提取 ELF 失败", error)
             return False, error
 
-        if hasattr(self, 'worker') and self.worker:
-            self.worker.stop()
-            self.worker = None
+        self.stop_sampling_thread()
 
         self.elf_reload_in_progress = True
         try:
@@ -1160,6 +1331,9 @@ class MCUStudioWindow(QMainWindow):
                 except RuntimeError: self.adv_parse_dialog = None
             self.refresh_ui_channel_bar()
             self.reset_canvas_adapt_ranges()
+            self.elf_last_signature = self._elf_file_signature()
+            self.elf_pending_signature = None
+            self.elf_pending_stable_ticks = 0
         finally:
             self.elf_reload_in_progress = False
 
@@ -1168,6 +1342,37 @@ class MCUStudioWindow(QMainWindow):
         self.lbl_status_text.setText("ELF 已自动重新提取" if source == "flash" else "ELF 已重新提取")
         if show_message: QMessageBox.information(self, "重新提取 ELF 完成", summary)
         return True, summary
+
+    def _elf_file_signature(self):
+        try:
+            stat = os.stat(os.path.abspath(self.config.elf_path))
+            return stat.st_mtime_ns, stat.st_size
+        except (OSError, TypeError, ValueError):
+            return None
+
+    def check_elf_file_changed(self):
+        if self.elf_reload_in_progress or self.flash_sequence_active:
+            return
+        signature = self._elf_file_signature()
+        if signature is None or signature == self.elf_last_signature:
+            self.elf_pending_signature = None
+            self.elf_pending_stable_ticks = 0
+            return
+        if signature != self.elf_pending_signature:
+            self.elf_pending_signature = signature
+            self.elf_pending_stable_ticks = 1
+            self.lbl_status_text.setText("检测到 ELF 更新，等待文件写入完成…")
+            return
+        self.elf_pending_stable_ticks += 1
+        if self.elf_pending_stable_ticks < 2:
+            return
+        ok, message = self.reload_elf_symbols(show_message=False, source="watch")
+        if ok:
+            self.lbl_status_text.setText("ELF 变化已自动同步到调试窗口")
+        else:
+            # Keep the old database and retry only after a short, stable delay.
+            self.elf_pending_stable_ticks = 0
+            self.lbl_status_text.setText(f"ELF 自动提取失败，将重试：{message.splitlines()[0]}")
 
     def type_info_for_path(self, path):
         if path.startswith(("0x", "0X")): return None
@@ -1200,8 +1405,9 @@ class MCUStudioWindow(QMainWindow):
         return number.to_bytes(size, "little", signed=encoding in (0x05, 0x06))
 
     def read_memory_bytes(self, address, size):
+        if self.backend_suspended: raise RuntimeError("通信后端已断开")
         if self.config.backend_mode == "JLINK":
-            if not self.jlink_native_instance or not self.jlink_native_instance.target_connected(): raise RuntimeError("链路断开")
+            if not self.jlink_native_instance: raise RuntimeError("链路断开")
             return bytes(self.jlink_native_instance.memory_read8(address, size))
         result = bytearray()
         for offset in range(size):
@@ -1211,12 +1417,15 @@ class MCUStudioWindow(QMainWindow):
         return bytes(result)
 
     def write_memory_bytes(self, address, data):
+        if self.backend_suspended: raise RuntimeError("通信后端已断开")
         if self.config.backend_mode == "JLINK":
-            if not self.jlink_native_instance or not self.jlink_native_instance.target_connected(): raise RuntimeError("链路断开")
+            if not self.jlink_native_instance: raise RuntimeError("链路断开")
             self.jlink_native_instance.memory_write8(address, list(data)); return
         for offset, value in enumerate(data): self.send_tcl_cmd(f"mwb {hex(address + offset)} {value}")
 
     def send_write_command(self, addr_hex, val_int, width_bytes, is_float=False):
+        if self.backend_suspended:
+            return
         try:
             addr = int(addr_hex, 16)
             if self.config.backend_mode == "OPENOCD":
@@ -1230,7 +1439,7 @@ class MCUStudioWindow(QMainWindow):
                 else:
                     self.send_tcl_cmd(f"mww {addr_hex} {val_int & 0xFFFFFFFF}")
             else:
-                if self.jlink_native_instance and self.jlink_native_instance.target_connected():
+                if self.jlink_native_instance:
                     if width_bytes == 1: self.jlink_native_instance.memory_write8(addr, [val_int & 0xFF])
                     elif width_bytes == 2: self.jlink_native_instance.memory_write16(addr, [val_int & 0xFFFF])
                     else: self.jlink_native_instance.memory_write32(addr, [val_int & 0xFFFFFFFF])
@@ -1238,7 +1447,7 @@ class MCUStudioWindow(QMainWindow):
             pass
 
     def send_tcl_cmd(self, cmd):
-        if not self.tcl_socket or not self.openocd_link_alive: return "ERROR"
+        if self.backend_suspended or not self.tcl_socket or not self.openocd_link_alive: return "ERROR"
         try:
             self.tcl_socket.sendall(f"{cmd}\x1a".encode('utf-8'))
             res = receive_tcl_response(self.tcl_socket)
@@ -1285,25 +1494,37 @@ class MCUStudioWindow(QMainWindow):
         self.custom_hz_edit.setValidator(QIntValidator(1, 8000, self))
         self.custom_hz_edit.editingFinished.connect(self.restart_sampling_thread)
         
-        self.btn_freeze = QPushButton("❄️ 锁定时间滚动")
+        self.btn_freeze = QPushButton("❄️ 锁定滚动")
+        self.btn_freeze.setToolTip("锁定/恢复波形时间轴滚动（空格键）")
         self.btn_freeze.clicked.connect(self.toggle_freeze)
 
-        self.btn_canvas_adapt = QPushButton("🎯 一键自适应画布")
+        self.btn_canvas_adapt = QPushButton("🎯 自适应画布")
         self.btn_canvas_adapt.setToolTip("采集 2 秒数据，按最大/最小值将 X、Y 显示跨度扩展为 2 倍")
         self.btn_canvas_adapt.clicked.connect(self.start_canvas_auto_adapt)
         self.canvas_adapt_timer = QTimer(self)
         self.canvas_adapt_timer.setSingleShot(True)
         self.canvas_adapt_timer.timeout.connect(self.finish_canvas_auto_adapt)
         
-        self.btn_reconnect = QPushButton("🔌 重启通信后端")
+        self.btn_disconnect = QPushButton("⏏ 断开后端")
+        self.btn_disconnect.setToolTip("立即停止软件读写并在后台释放通信后端；拔掉实际线路卡住时界面不会等待")
+        self.btn_disconnect.clicked.connect(self.disconnect_backend)
+
+        self.btn_reconnect = QPushButton("🔌 通信重连")
+        self.btn_reconnect.setToolTip("重新启动并连接当前配置的通信后端，不复位 MCU")
         self.btn_reconnect.clicked.connect(self.force_reconnect_engine)
         
-        self.btn_mcu_reset = QPushButton("♻️ 强制复位")
-        self.btn_mcu_reset.setStyleSheet("background-color: #4a1515; color: #ff8a80;")
+        self.btn_mcu_reset = QPushButton("♻️ 复位")
+        self.btn_mcu_reset.setStyleSheet(
+            "background-color: #4a1515; color: #ff8a80; border: 1px solid #7f1d1d;" if self.is_dark_theme
+            else "background-color: #ffebee; color: #c62828; border: 1px solid #ef9a9a;"
+        )
         self.btn_mcu_reset.clicked.connect(self.trigger_manual_mcu_reset)
 
-        self.btn_flash = QPushButton("⚡ 烧录 ELF")
-        self.btn_flash.setStyleSheet("background-color: #5d3b00; color: #ffd54f;")
+        self.btn_flash = QPushButton("⚡ 烧录")
+        self.btn_flash.setStyleSheet(
+            "background-color: #5d3b00; color: #ffd54f; border: 1px solid #8a5a00;" if self.is_dark_theme
+            else "background-color: #fff3e0; color: #b45309; border: 1px solid #ffcc80;"
+        )
         self.btn_flash.setToolTip("只有点击并确认后才会擦写 Flash/复位；普通调试不复位 MCU")
         self.btn_flash.clicked.connect(self.flash_elf_by_user)
         self.btn_flash.setEnabled(self.config.backend_mode == "JLINK")
@@ -1315,16 +1536,20 @@ class MCUStudioWindow(QMainWindow):
         top.addWidget(self.btn_canvas_adapt)
         
         top.addSpacing(10) 
+        top.addWidget(self.btn_disconnect)
         top.addWidget(self.btn_reconnect) 
         top.addWidget(self.btn_flash)
         top.addWidget(self.btn_mcu_reset) 
         top.addStretch()
         
-        top.addWidget(QLabel("<b>🖼️ 画布同屏分布:</b>"))
+        top.addWidget(QLabel("<b>🖼️ 画布布局:</b>"))
         self.layout_group = QButtonGroup(self)
-        self.rad_map1 = QRadioButton("单图 (1行独占)")
-        self.rad_map2 = QRadioButton("双图 (2行上下均匀)")
-        self.rad_map3 = QRadioButton("三图 (3行上下均匀)")
+        self.rad_map1 = QRadioButton("单图")
+        self.rad_map2 = QRadioButton("双图")
+        self.rad_map3 = QRadioButton("三图")
+        self.rad_map1.setToolTip("单图（1 行独占）")
+        self.rad_map2.setToolTip("双图（2 行上下均匀）")
+        self.rad_map3.setToolTip("三图（3 行上下均匀）")
         self.layout_group.addButton(self.rad_map1, 1)
         self.layout_group.addButton(self.rad_map2, 2)
         self.layout_group.addButton(self.rad_map3, 3)
@@ -1377,10 +1602,10 @@ class MCUStudioWindow(QMainWindow):
         self.main_splitter.addWidget(self.tab_widget)
         
         self.plot_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.plot_splitter.setStyleSheet("QSplitter::handle { height: 4px; background-color: #2a2a2a; }")
+        self.plot_splitter.setStyleSheet(f"QSplitter::handle {{ height: 4px; background-color: {self.theme_colors['splitter']}; }}")
         
         self.plot_widgets = []
-        self.ch_colors = ['#00E676', '#FFD600', '#00E5FF'] 
+        self.ch_colors = self.theme_colors['channels']
         self.v_lines = []
         self.h_lines = []
         self.hover_dots = []
@@ -1388,15 +1613,19 @@ class MCUStudioWindow(QMainWindow):
 
         for i in range(3):
             pw = pg.PlotWidget()
-            pw.setBackground('#111111')
+            pw.setBackground(self.theme_colors['plot_bg'])
             pw.showGrid(x=True, y=True, alpha=0.2)
             pw.setLabel('bottom', '时间滚动追踪轴', units='ms')
+            for axis_name in ('left', 'bottom'):
+                axis = pw.getAxis(axis_name)
+                axis.setPen(pg.mkPen(self.theme_colors['axis']))
+                axis.setTextPen(pg.mkPen(self.theme_colors['axis_text']))
             pw.getViewBox().setDefaultPadding(0.0)
             pw.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             pw.customContextMenuRequested.connect(lambda pos, idx=i: self.show_plot_context_menu(pos, idx))
 
-            v_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('#90a4ae', width=1, style=Qt.PenStyle.DashLine))
-            h_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('#90a4ae', width=1, style=Qt.PenStyle.DashLine))
+            v_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(self.theme_colors['crosshair'], width=1, style=Qt.PenStyle.DashLine))
+            h_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(self.theme_colors['crosshair'], width=1, style=Qt.PenStyle.DashLine))
             v_line.setVisible(False)
             h_line.setVisible(False)
             pw.addItem(v_line)
@@ -1404,12 +1633,12 @@ class MCUStudioWindow(QMainWindow):
             self.v_lines.append(v_line)
             self.h_lines.append(h_line)
 
-            hover_dot = pg.ScatterPlotItem(size=10, pen=pg.mkPen('#ffffff', width=2))
+            hover_dot = pg.ScatterPlotItem(size=10, pen=pg.mkPen(self.theme_colors['hover_pen'], width=2))
             hover_dot.setVisible(False)
             pw.addItem(hover_dot)
             self.hover_dots.append(hover_dot)
 
-            hover_label = pg.TextItem(anchor=(0, 1), color='#ffffff', fill='#263238')
+            hover_label = pg.TextItem(anchor=(0, 1), color=self.theme_colors['hover_text'], fill=self.theme_colors['hover_fill'])
             hover_label.setVisible(False)
             pw.addItem(hover_label)
             self.hover_labels.append(hover_label)
@@ -1428,10 +1657,11 @@ class MCUStudioWindow(QMainWindow):
         self.lbl_ch2 = QLabel("CH2: 📭 空闲")
         self.lbl_ch3 = QLabel("CH3: 📭 空闲")
         
-        ch_style = "font-family: 'Consolas'; font-size: 11px; font-weight: bold; padding: 2px 10px; border-radius: 4px; background-color: #161616; border: 1px solid #252525;"
-        self.lbl_ch1.setStyleSheet(f"{ch_style} color: #00E676;")
-        self.lbl_ch2.setStyleSheet(f"{ch_style} color: #FFD600;")
-        self.lbl_ch3.setStyleSheet(f"{ch_style} color: #00E5FF;")
+        ch_style = ("font-family: 'Consolas'; font-size: 11px; font-weight: bold; padding: 2px 10px; "
+                    f"border-radius: 4px; background-color: {self.theme_colors['panel']}; border: 1px solid {self.theme_colors['panel_border']};")
+        self.lbl_ch1.setStyleSheet(f"{ch_style} color: {self.ch_colors[0]};")
+        self.lbl_ch2.setStyleSheet(f"{ch_style} color: {self.ch_colors[1]};")
+        self.lbl_ch3.setStyleSheet(f"{ch_style} color: {self.ch_colors[2]};")
         
         bottom_bar.addWidget(self.lbl_ch1)
         bottom_bar.addWidget(self.lbl_ch2)
@@ -1492,11 +1722,13 @@ class MCUStudioWindow(QMainWindow):
     def toggle_freeze(self):
         self.is_frozen = not self.is_frozen
         if self.is_frozen:
-            self.btn_freeze.setText("▶️ 恢复滚动追踪")
-            self.btn_freeze.setStyleSheet("background-color: #e65100;")
+            self.btn_freeze.setText("▶️ 恢复滚动")
+            self.btn_freeze.setStyleSheet("background-color: #e65100; color: white; border: 1px solid #bf4a00;")
         else:
-            self.btn_freeze.setText("❄️ 锁定时间滚动")
-            self.btn_freeze.setStyleSheet("background-color: #2d2d2d;")
+            self.btn_freeze.setText("❄️ 锁定滚动")
+            self.btn_freeze.setStyleSheet(
+                f"background-color: {self.theme_colors['neutral_button']}; color: {self.theme_colors['neutral_text']};"
+            )
             for i in range(3):
                 if self.v_lines[i]: self.v_lines[i].setVisible(False)
                 if self.h_lines[i]: self.h_lines[i].setVisible(False)
@@ -1555,7 +1787,7 @@ class MCUStudioWindow(QMainWindow):
                 self.plot_widgets[plot_idx].setYRange(y_lower, y_upper, padding=0)
                 adapted += 1
         self.btn_canvas_adapt.setEnabled(True)
-        self.btn_canvas_adapt.setText("🎯 一键自适应画布")
+        self.btn_canvas_adapt.setText("🎯 自适应画布")
         if adapted:
             self.lbl_status_text.setText(f"已自适应 {adapted} 个画布（X/Y 跨度 ×2）")
         else:
@@ -1576,7 +1808,8 @@ class MCUStudioWindow(QMainWindow):
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes: return
-        self._execute_flash_animation(self.btn_mcu_reset, "#e53935", "color: #ff8a80;")
+        reset_text = "#ff8a80" if self.is_dark_theme else "#c62828"
+        self._execute_flash_animation(self.btn_mcu_reset, "#e53935", f"color: {reset_text};")
         if self.config.backend_mode == "OPENOCD":
             if self.openocd_link_alive and self.tcl_socket:
                 try:
@@ -1586,7 +1819,7 @@ class MCUStudioWindow(QMainWindow):
                     except: pass
                 except: pass
         else:
-            if self.jlink_native_instance and self.jlink_native_instance.target_connected(): 
+            if self.jlink_native_instance:
                 try: self.jlink_native_instance.reset()
                 except: pass
         self.force_reconnect_engine()
@@ -1622,14 +1855,26 @@ class MCUStudioWindow(QMainWindow):
         self.btn_flash.setEnabled(False)
         self.btn_flash.setText("⏳ 正在烧录…")
         self.lbl_status_text.setText("正在烧录 ELF（界面仍可响应）")
-        if hasattr(self, 'worker') and self.worker:
-            self.worker.stop(); self.worker = None
-        if self.jlink_native_instance:
-            try: self.jlink_native_instance.close()
-            except Exception: pass
-            self.jlink_native_instance = None
+        self.flash_sequence_active = True
+        self.backend_suspended = True
+        self.stop_sampling_thread()
+        old_link = self.jlink_native_instance
+        self.jlink_native_instance = None
+        self.pending_flash_args = (
+            commander, jlink_dir, elf_path, device, self.config.jlink_connect_device, loader_config
+        )
+        if old_link:
+            self._close_native_link_async(old_link, next_action="flash")
+            return
+        self._start_pending_flash()
+
+    def _start_pending_flash(self):
+        args = getattr(self, 'pending_flash_args', None)
+        self.pending_flash_args = None
+        if not args:
+            return
         self.flash_worker = ElfFlashWorker(
-            commander, jlink_dir, elf_path, device, self.config.jlink_connect_device, loader_config, self
+            *args, self
         )
         self.flash_worker.finished_signal.connect(self.handle_flash_finished)
         self.flash_worker.start()
@@ -1695,7 +1940,9 @@ class MCUStudioWindow(QMainWindow):
 
     def handle_flash_finished(self, success, message, link):
         self.jlink_native_instance = link
-        self.btn_flash.setText("⚡ 烧录 ELF")
+        self.flash_sequence_active = False
+        self.backend_suspended = False
+        self.btn_flash.setText("⚡ 烧录")
         self.btn_flash.setEnabled(self.config.backend_mode == "JLINK")
         self.lbl_status_text.setText("烧录完成" if success else "烧录失败")
         if success:
@@ -1708,6 +1955,8 @@ class MCUStudioWindow(QMainWindow):
 
     def force_reconnect_engine(self):
         self._execute_flash_animation(self.btn_reconnect, "#00b0ff", "")
+        self.backend_suspended = True
+        self.stop_sampling_thread()
         if self.config.backend_mode == "OPENOCD":
             if self.tcl_socket: 
                 try: self.tcl_socket.close()
@@ -1718,14 +1967,81 @@ class MCUStudioWindow(QMainWindow):
             time.sleep(0.2)
             launch_openocd(self.config)
             time.sleep(0.6)
-        self.init_global_link_backend()
+            self.backend_suspended = False
+            self.init_global_link_backend()
+            self._finish_backend_reconnect()
+            return
+
+        old_link = self.jlink_native_instance
+        self.jlink_native_instance = None
+        if old_link:
+            self._close_native_link_async(old_link, next_action="reconnect")
+            self.lbl_status_text.setText("正在后台释放旧 J-Link 后端…")
+        else:
+            self.backend_suspended = False
+            self.init_global_link_backend()
+            self._finish_backend_reconnect()
+
+    def disconnect_backend(self):
+        if self.flash_sequence_active:
+            QMessageBox.information(self, "正在烧录", "烧录过程中不能断开通信后端。")
+            return
+        self.backend_suspended = True
+        self.stop_sampling_thread()
+        if self.tcl_socket:
+            try: self.tcl_socket.shutdown(socket.SHUT_RDWR)
+            except Exception: pass
+            try: self.tcl_socket.close()
+            except Exception: pass
+        self.tcl_socket = None
+        self.openocd_link_alive = False
+        if self.config.backend_mode == "OPENOCD":
+            try: stop_managed_openocd(self.config)
+            except Exception: pass
+        old_link = self.jlink_native_instance
+        self.jlink_native_instance = None
+        if old_link:
+            self._close_native_link_async(old_link)
+        self.btn_disconnect.setEnabled(False)
+        self.btn_reconnect.setEnabled(True)
+        self.lbl_status_text.setText("通信后端已断开（未复位 MCU）")
+        self.lbl_status_text.setStyleSheet("color: #f59e0b; font-family: 'Microsoft YaHei'; font-size: 11px; font-weight: bold;")
+
+    def _close_native_link_async(self, link, next_action=""):
+        closer = BackendCloseWorker(link, self)
+        self.backend_close_workers.append(closer)
+        closer.finished_signal.connect(
+            lambda error, worker=closer, action=next_action:
+            self._native_link_closed(worker, error, action)
+        )
+        closer.start()
+
+    def _native_link_closed(self, worker, error, next_action):
+        if worker in self.backend_close_workers:
+            self.backend_close_workers.remove(worker)
+        worker.deleteLater()
+        if next_action == "reconnect":
+            self.backend_suspended = False
+            self.init_global_link_backend()
+            self._finish_backend_reconnect()
+        elif next_action == "flash":
+            self._start_pending_flash()
+        elif error:
+            self.lbl_status_text.setText(f"后端已停止读写；驱动释放异常：{error}")
+
+    def _finish_backend_reconnect(self):
+        connected = (self.openocd_link_alive if self.config.backend_mode == "OPENOCD"
+                     else bool(self.jlink_native_instance))
+        self.btn_disconnect.setEnabled(connected)
+        self.btn_reconnect.setEnabled(True)
+        self.lbl_status_text.setText("通信后端重连完成" if connected else "通信后端重连失败")
         self.restart_sampling_thread()
 
     def _execute_flash_animation(self, button, target_color, base_style):
         anim = QVariantAnimation(button)
         anim.setDuration(220) 
         anim.setStartValue(QColor(target_color))
-        anim.setEndValue(QColor("#2d2d2d")) 
+        anim.setEndValue(QColor(self.theme_colors['neutral_button']))
         anim.valueChanged.connect(lambda val: button.setStyleSheet(f"{base_style} background-color: {val.name()};"))
         anim.start()
 
@@ -1926,7 +2242,7 @@ class MCUStudioWindow(QMainWindow):
         if pw.isHidden() or not pw.isVisible(): return
         try:
             menu = pw.getPlotItem().getContextMenus(None)
-            menu.setStyleSheet(POPUP_MENU_STYLE)
+            menu.setStyleSheet(self.popup_menu_style)
             y_val_menu = None
             for act in menu.actions():
                 if act.menu() and "Y_Val" in act.menu().title():
@@ -1934,7 +2250,7 @@ class MCUStudioWindow(QMainWindow):
             if not y_val_menu:
                 y_val_menu = QMenu("📈 Y_Val 数据源定义", menu)
                 menu.insertMenu(menu.actions()[0] if menu.actions() else None, y_val_menu)
-            y_val_menu.setStyleSheet(POPUP_MENU_STYLE)
+            y_val_menu.setStyleSheet(self.popup_menu_style)
             
             if not available_paths:
                 action = QAction("⚠️ 暂无高速通道绑定的变量", y_val_menu)
@@ -1967,7 +2283,7 @@ class MCUStudioWindow(QMainWindow):
         if not path: path = item.text(0)
         
         menu = QMenu()
-        menu.setStyleSheet(POPUP_MENU_STYLE)
+        menu.setStyleSheet(self.popup_menu_style)
         bound_ch_idx = -1
         for i in range(3):
             if self.ch_paths[i] == path: bound_ch_idx = i; break
@@ -2170,8 +2486,9 @@ class MCUStudioWindow(QMainWindow):
         
     def restart_sampling_thread(self):
         if getattr(self, 'elf_reload_in_progress', False): return
-        if hasattr(self, 'worker') and self.worker:
-            self.worker.stop(); self.worker = None
+        self.stop_sampling_thread()
+        if self.backend_suspended:
+            return
             
         hz_idx = self.wave_hz_combo.currentIndex()
         if hz_idx == 0:
@@ -2189,8 +2506,28 @@ class MCUStudioWindow(QMainWindow):
             self.worker.data_received.connect(self.handle_high_speed_data)
             self.worker.start()
 
+    def stop_sampling_thread(self, wait_ms=250):
+        worker = getattr(self, 'worker', None)
+        self.worker = None
+        if not worker:
+            return True
+        stopped = worker.stop(wait_ms)
+        if not stopped:
+            # Keep ownership until the blocked driver call returns.  This is
+            # crucial: destroying a still-running QThread can crash Qt.
+            self.retired_workers.append(worker)
+            worker.finished.connect(lambda w=worker: self._forget_retired_worker(w))
+        else:
+            worker.deleteLater()
+        return stopped
+
+    def _forget_retired_worker(self, worker):
+        if worker in self.retired_workers:
+            self.retired_workers.remove(worker)
+        worker.deleteLater()
+
     def low_speed_tree_refresh(self):
-        if self.layout_switching: return
+        if self.layout_switching or self.backend_suspended: return
         all_db_vars = {x[0]: (x[2], x[3], x[4] if len(x)>4 else 0) for x in self.db.get_all_vars()}
         labels = [self.lbl_ch1, self.lbl_ch2, self.lbl_ch3]
         locker = QMutexLocker(self.buffer_mutex)
@@ -2241,7 +2578,7 @@ class MCUStudioWindow(QMainWindow):
                     if "ERROR" in res or ":" not in res: raise Exception()
                     raw_int = int(res.split(":")[-1].strip(), 16)
                 else:
-                    if not self.jlink_native_instance or not self.jlink_native_instance.target_connected(): raise Exception()
+                    if not self.jlink_native_instance: raise Exception()
                     if width_bytes == 1: raw_int = self.jlink_native_instance.memory_read8(absolute_address, 1)[0]
                     elif width_bytes == 2: raw_int = self.jlink_native_instance.memory_read16(absolute_address, 1)[0]
                     else: raw_int = self.jlink_native_instance.memory_read32(absolute_address, 1)[0]
@@ -2306,37 +2643,47 @@ class MCUStudioWindow(QMainWindow):
 
     def update_hardware_heartbeat(self):
         is_alive = False
-        if self.config.backend_mode == "OPENOCD":
+        if self.backend_suspended:
+            is_alive = False
+        elif self.config.backend_mode == "OPENOCD":
             worker_alive = hasattr(self, 'worker') and self.worker and self.worker.isRunning() and self.worker.is_link_alive
             has_worker = hasattr(self, 'worker') and self.worker and self.worker.isRunning()
             is_alive = self.openocd_link_alive and (not has_worker or worker_alive)
-        else: is_alive = True if (self.jlink_native_instance and self.jlink_native_instance.target_connected()) else False
+        else:
+            # Do not call into the native DLL from the GUI heartbeat.  Some
+            # probe/USB disconnects make target_connected() wait inside the
+            # driver and would freeze every widget, including Disconnect.
+            worker_alive = bool(self.worker and self.worker.isRunning() and self.worker.is_link_alive)
+            is_alive = bool(self.jlink_native_instance) and (not self.worker or worker_alive)
 
         if is_alive:
             self.heartbeat_state = not self.heartbeat_state
             self.lbl_led.setStyleSheet(f"background-color: {'#00E676' if self.heartbeat_state else '#00b252'}; border-radius: 5px;")
             self.lbl_status_text.setText(f"调试在线 ({self.config.backend_mode})")
-            self.lbl_status_text.setStyleSheet("color: #00E676; font-family: 'Microsoft YaHei'; font-size: 11px; font-weight: bold;")
+            self.lbl_status_text.setStyleSheet(f"color: {self.theme_colors['status_ok']}; font-family: 'Microsoft YaHei'; font-size: 11px; font-weight: bold;")
         else:
             self.lbl_led.setStyleSheet("background-color: #d32f2f; border-radius: 5px;")
-            self.lbl_status_text.setText("链路断开")
+            self.lbl_status_text.setText("通信后端已断开" if self.backend_suspended else "链路断开")
             self.lbl_status_text.setStyleSheet("color: #d32f2f; font-family: 'Microsoft YaHei'; font-size: 11px; font-weight: bold;")
 
     def closeEvent(self, event):
-        if hasattr(self, 'flash_worker') and self.flash_worker and self.flash_worker.isRunning():
+        if self.flash_sequence_active:
             QMessageBox.information(self, "正在烧录", "Flash 烧录尚未完成，为避免中断导致芯片无法启动，请等待烧录结束。")
             event.ignore()
             return
-        if hasattr(self, 'worker') and self.worker: self.worker.stop()
+        if hasattr(self, 'elf_watch_timer'): self.elf_watch_timer.stop()
+        self.backend_suspended = True
+        self.stop_sampling_thread()
         if self.tcl_socket:
             try: self.tcl_socket.close()
             except: pass
         if self.config.backend_mode == "OPENOCD":
             try: stop_managed_openocd(self.config)
             except: pass
-        if self.jlink_native_instance:
-            try: self.jlink_native_instance.close()
-            except: pass
+        # Process teardown releases a native J-Link handle.  Calling close()
+        # here can block forever after USB removal, so never hold the GUI close
+        # event on the vendor DLL.
+        self.jlink_native_instance = None
         event.accept()
 
 
@@ -2352,6 +2699,7 @@ class HighSpeedSamplingWorker(QThread):
         self.elf_db = elf_db
         self.running = True
         self.is_link_alive = False  
+        self.active_socket = None
 
     def run(self):
         s = None
@@ -2398,6 +2746,7 @@ class HighSpeedSamplingWorker(QThread):
 
             try:
                 s = connect_openocd()
+                self.active_socket = s
                 self.is_link_alive = True
             except Exception:
                 self.is_link_alive = False
@@ -2415,6 +2764,7 @@ class HighSpeedSamplingWorker(QThread):
                     try:
                         if s: s.close()
                         s = connect_openocd()
+                        self.active_socket = s
                         self.is_link_alive = True
                     except Exception:
                         self.is_link_alive = False
@@ -2451,9 +2801,10 @@ class HighSpeedSamplingWorker(QThread):
                         try: s.close()
                         except Exception: pass
                     s = None
+                    self.active_socket = None
                     continue
             else:
-                if self.jlink and self.jlink.target_connected():
+                if self.jlink:
                     try:
                         for c in parsed_channels:
                             if c['width'] == 1: raw = self.jlink.memory_read8(c['addr'], 1)[0]
@@ -2461,9 +2812,12 @@ class HighSpeedSamplingWorker(QThread):
                             elif c['width'] == 4: raw = self.jlink.memory_read32(c['addr'], 1)[0]
                             else: raw = int.from_bytes(bytes(self.jlink.memory_read8(c['addr'], c['width'])), "little")
                             packet[c['ch_idx']] = decode_sample_value(raw, c)
-                    except: 
+                        self.is_link_alive = True
+                    except:
+                        self.is_link_alive = False
                         time.sleep(0.04); continue
                 else:
+                    self.is_link_alive = False
                     time.sleep(0.04); continue
 
             if packet: local_batch.append((t_now, packet))
@@ -2475,10 +2829,18 @@ class HighSpeedSamplingWorker(QThread):
         if s: 
             try: s.close()
             except: pass
+        self.active_socket = None
 
-    def stop(self):
+    def stop(self, wait_ms=250):
         self.running = False
-        self.wait()
+        sock = self.active_socket
+        if sock:
+            try: sock.shutdown(socket.SHUT_RDWR)
+            except Exception: pass
+            try: sock.close()
+            except Exception: pass
+            self.active_socket = None
+        return self.wait(max(0, int(wait_ms)))
 
 
 
@@ -2487,6 +2849,7 @@ class HighSpeedSamplingWorker(QThread):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    pg.setConfigOption('foreground', '#e0e0e0')
     app.setStyleSheet(DARK_STYLE)
     db = LiveWatchDB()
     dlg = LoginConfigDialog(db)

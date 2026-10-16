@@ -9,7 +9,6 @@ import sqlite3
 import os
 import xml.etree.ElementTree as ET
 import tempfile
-import shutil
 import bisect
 import platform  
 import numpy as np 
@@ -977,48 +976,12 @@ class ElfFlashWorker(QThread):
 
     def run(self):
         script_path = ""
-        device_xml_dir = ""
         run_commander = self.commander
         command_device = self.flash_device
         success = False
         message = ""
         link = None
         try:
-            if self.loader_config:
-                device_xml_dir = tempfile.mkdtemp(prefix="mcu_studio_jlink_device_")
-                temporary_device_name = f"MCUStudio_{self.flash_device}"
-                command_device = temporary_device_name
-                database = ET.Element("Database")
-                device = ET.SubElement(database, "Device")
-                ET.SubElement(device, "ChipInfo", {
-                    "Vendor": self.loader_config["vendor"],
-                    "Name": temporary_device_name,
-                    "WorkRAMAddr": hex(self.loader_config["ram_addr"]),
-                    "WorkRAMSize": hex(self.loader_config["ram_size"]),
-                    "Core": self.loader_config["core"],
-                })
-                ET.SubElement(device, "FlashBankInfo", {
-                    "Name": self.loader_config["flash_name"],
-                    "BaseAddr": hex(self.loader_config["flash_addr"]),
-                    "MaxSize": hex(self.loader_config["flash_size"]),
-                    "Loader": self.loader_config["loader_path"],
-                    "LoaderType": self.loader_config["loader_type"],
-                    "AlwaysPresent": "1",
-                })
-                ET.ElementTree(database).write(
-                    os.path.join(device_xml_dir, "JLinkDevices.xml"),
-                    encoding="utf-8", xml_declaration=True,
-                )
-                # J-Link V7.22b reads JLinkDevices.xml only while the DLL is
-                # starting. A command string issued later is too late. Launch
-                # an isolated copy of the configured C-drive Commander/DLL so
-                # it sees the corrected one-device XML at process startup.
-                run_commander = os.path.join(device_xml_dir, "JLink.exe")
-                shutil.copy2(self.commander, run_commander)
-                dll_source = os.path.join(self.jlink_dir, "JLinkARM.dll")
-                if not os.path.isfile(dll_source):
-                    raise FileNotFoundError(f"找不到 JLinkARM.dll：{dll_source}")
-                shutil.copy2(dll_source, os.path.join(device_xml_dir, "JLinkARM.dll"))
             with tempfile.NamedTemporaryFile(
                 "w", suffix=".jlink", encoding="utf-8", newline="\n", delete=False
             ) as script:
@@ -1042,7 +1005,7 @@ class ElfFlashWorker(QThread):
             ])
             result = subprocess.run(
                 command,
-                cwd=device_xml_dir or self.jlink_dir,
+                cwd=self.jlink_dir,
                 env=process_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -1068,8 +1031,6 @@ class ElfFlashWorker(QThread):
             if script_path:
                 try: os.remove(script_path)
                 except OSError: pass
-            if device_xml_dir:
-                shutil.rmtree(device_xml_dir, ignore_errors=True)
             try:
                 link = self._reconnect_without_reset()
             except Exception as exc:

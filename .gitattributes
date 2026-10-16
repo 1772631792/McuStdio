@@ -1,0 +1,14 @@
+# Keep bundled toolchain binaries byte-for-byte identical on every platform.
+runtime/** -text
+
+# Preserve readable runtime configuration and documentation as text.
+runtime/**/*.cfg text eol=lf
+runtime/**/*.tcl text eol=lf
+runtime/**/*.txt text eol=lf
+runtime/**/README text eol=lf
+runtime/**/*.html text eol=lf
+
+*.md text eol=lf
+*.py text eol=lf
+*.spec text eol=lf
+*.ps1 text eol=crlf

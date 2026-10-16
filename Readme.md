@@ -1,34 +1,89 @@
-没事搞了一个（STM32 等 Cortex-M 内核芯片）的免打断、高频变量数据实时波形监控工具，去除一切繁琐功能如断点类似的，保留最核心的变量实时显示和双击改值和波形显示，本工具主要是解决vscode编译烧录后最不好用的调试功能，感觉那些实时的插件都不是很好用
+# MCU Live Watch Studio
 
-工具已经全套封装成独立的 `.exe`，双击即可直接运行。
+MCU Live Watch Studio 是一个面向 Cortex-M 单片机的实时变量观测工具。它通过 J-Link DLL 或 OpenOCD 直接读写 MCU 内存，不依赖 Keil 的断点调试会话，适合电机控制、电源、PID 调参等需要保持固件连续运行的场景。
 
-### ⚡ 工具优点
+> 当前 J-Link 后端已实机使用；CMSIS-DAP/ST-Link + OpenOCD 后端仍属待完善功能。在用于高风险功率设备前，请先在低风险平台上验证连接和复位行为。
 
-* **绝对不卡死 MCU，不影响实时控制**
-  采用后台高频内存直读（DAP管道/JLINK-DLL），MCU 在台前正常运行，不会乱reset，直接读值，默默读取默默退出。对电机控制、电源控制等极度友好。
-* **支持“半路热插拔现场抓取”，启动不强制 Reset**
-  工具启动时默认不发送任何 Reset 信号。如果单片机连续运行很久并突发 Bug，随时连上仿真器打开软件就能直接读出当前内存里的真实数据，完美保护崩溃现场。
-* **硬件断了可以手动恢复，不会直接像keil卡死**
-  在调试过程中，如果板子突然断电、复位或仿真器排线掉落，上位机绝对不会假死、卡屏或报错崩溃。后台会自动静默守护，硬件重新接上后通信即可手动恢复，稳定性希望帮忙测测，我自己是可以开发stm32和py32的。
-* **C 语言结构体粘代码树状拆解**
-  无需像 Ozone 或 Keil 那样必须在本地打开完整的工程源码。如果配合 VS Code 等轻量级编辑器开发，只需把 C 语言的 `struct` 定义和全局声明代码直接贴进面板，软件会自动拆解成可展开的树状图并计算好全部物理地址。
-* **自动解除占用，不耍流氓**
-  在关闭软件的瞬间，会自动释放所有底层硬件管道并断开通信。绝不锁死仿真器，关闭后可以无缝切换去 MDK 烧录或 Debug。
+## 主要功能
 
-### 软件界面截图
+- 从 ELF/DWARF 读取全局变量、类型、结构体和枚举信息。
+- 树形展开结构体、数组和多级成员。
+- 低速表格实时刷新，双击可修改 MCU 内存中的标量值。
+- 三通道波形观测，支持单图、双图和三图布局。
+- 空格键暂停时间轴，十字光标回看时间戳和数值。
+- J-Link 模式支持 ELF 烧录、手动复位、断开和重连。
+- OpenOCD 模式支持 CMSIS-DAP 与 ST-Link，可选内置或自定义 interface/target cfg。
 
-![PixPin_2026-05-25_16-20-44.png](https://file1.elecfans.com/web3/M00/61/66/wKgZPGoUBmOAP7HxAAL1ZVXrXKM604.png)
+## 快速开始
 
+### 从源码运行
 
-> 
+需要 Python 3.10 或更高版本。
 
-### 核心功能简述
+```powershell
+python -m pip install PyQt6 pyqtgraph numpy pyelftools pylink-square
+python .\live_set.py
+```
 
-* **高速示波器画布** ：最高支持 8000Hz 极速采样数据流，支持单图/双图/三图分屏上下分布。按下`空格键`可锁定时间滚动，支持十字光标精准回溯时间戳与数值。
-* **双击改值** ：左侧树状主表约 5Hz 常规刷新，双击数值列即可直接输入新参数并敲回车，硬件级写入芯片内存（如 PID 在线调参）。
-* **只能人工复位** ：调过电流环或者can电机的应该了解过，reset byd会让电机疯掉或者板子炸掉，调试的时候
-* **只能人工重连** ：不会自动连，这样就不会线断了莫名卡死，人拥有最终解释权
+启动后：
 
-Jlink 测试是完全正常的，工作也是完全舍弃了keil
+1. 选择固件 `.elf` 文件。
+2. 选择 J-Link 或 OpenOCD 后端。
+3. J-Link 模式下选择 SEGGER 安装目录和准确的 Device。
+4. OpenOCD 模式下选择 `openocd.exe`、调试器 cfg 和与芯片完全匹配的 target cfg。
+5. 进入工作站后添加变量，再绑定到 CH1–CH3。
 
-现在openocd 的stlink和daplink系列平常没时间测 有问题可以反馈
+### OpenOCD 注意事项
+
+- 仓库已包含 OpenOCD，路径为 `runtime/OpenOCD/bin/openocd.exe`。
+- 内置脚本已包含常见 STM32 target，但不代表支持所有国产兼容芯片。
+- 当前界面中的 `py32f0xx.cfg` 需要用户自行提供；所选 OpenOCD 发行包若没有该脚本，则无法连接。
+- OpenOCD 启动时会执行 target 初始化。是否会影响复位线，取决于 target cfg、接线和调试器。
+- 请确保 TCP 3333、4444 和 6666 端口没有被其他 OpenOCD 实例占用。
+
+## 项目结构
+
+```text
+McuStdio/
+├─ live_set.py              # 唯一应用入口
+├─ build.py                 # 打包入口，可设置 EXE 名称
+├─ README.md
+├─ assets/                 # 图标等静态资源
+├─ live_watch_history.db   # 运行数据，与入口/可执行文件同级
+├─ runtime/                # 跟随 Git 发布的 OpenOCD、ARM GCC、cfg 和 SVD
+├─ packaging/              # PyInstaller spec
+├─ tools/                  # 图标生成、仓库打包等工具
+├─ doc/                    # 目录说明、已知问题和历史归档
+├─ dist/                   # 打包后的 EXE（Git 忽略）
+└─ artifacts/              # build 缓存和其他可再生成产物
+```
+
+程序会在入口脚本或可执行文件的同级目录创建 `live_watch_history.db`，用于保存布局、变量和后端配置。因此发布 EXE 时，数据库应与 EXE 放在一起。
+
+## 打包
+
+先打开 `build.py`，修改顶部的 `APP_NAME`（不要带 `.exe`），然后执行：
+
+```powershell
+python -m pip install pyinstaller
+python .\build.py
+```
+
+`build.py` 只使用 `packaging/Mcu_Studio.spec`，强制选择 PyQt6，并排除 PySide6、PyQt5 及其绑定库。打包后还会自动检查 EXE 内容；如果发现第二套 Qt，脚本会报错退出。历史 spec 仅存放在 `doc/archive/packaging/`，不要用于发布。
+
+打包成品输出到项目根目录的 `dist/`，例如 `dist/Mcu_Studio.exe`。PyInstaller 中间文件仍保存在 `artifacts/build/`。
+
+## 内置工具链
+
+`runtime/` 不在 `.gitignore` 中，应跟随开源仓库提交。当前包含：
+
+- Arm GNU Toolchain 15.2.Rel1：`runtime/arm-gcc/`
+- OpenOCD 0.12.0：`runtime/OpenOCD/`
+- 常用 target cfg：`runtime/cfg/`
+- SVD 资源：`runtime/svd/`
+
+该目录约 1.14 GiB，会显著增加克隆和下载时间。第三方工具版本与许可说明见 `doc/03-第三方工具链.md`。
+
+## 界面预览
+
+![MCU Live Watch Studio](https://file1.elecfans.com/web3/M00/61/66/wKgZPGoUBmOAP7HxAAL1ZVXrXKM604.png)

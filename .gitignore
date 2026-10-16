@@ -1,17 +1,17 @@
-# 屏蔽 Python 编译缓存
+# Python 缓存
 __pycache__/
-*.pyc
+*.py[cod]
 
-# 屏蔽 编译工具链和打包输出（那几万个文件的罪魁祸首）
-arm-gcc/
-build/
-dist/
-OpenOCD/
-SVD/
-dist/
-cfg/
-*.spec
-*.db
+# 构建产物
+artifacts/
+/dist/
+
+# 用户本地数据
+data/*.db
+
+# 临时打包和日志文件
+*.log
+*.tmp
 
 
 

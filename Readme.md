@@ -112,7 +112,7 @@ McuStdio/
 ├─ live_watch_history.db   # 本机运行配置，与入口/EXE 同级
 ├─ mcu_studio/             # 核心、后台硬件任务和界面
 ├─ assets/                 # 图标和文档截图
-├─ runtime/                # 随仓库发布的 OpenOCD、ARM GCC、cfg、SVD
+├─ runtime/                # 随仓库发布的 OpenOCD、附加 cfg、SVD
 ├─ packaging/              # 当前 PyInstaller 配置
 ├─ tools/                  # 校验与辅助工具
 ├─ doc/                    # 文档、已知问题和历史归档
@@ -124,4 +124,4 @@ McuStdio/
 
 ## 内置工具链与许可
 
-`runtime/` 跟随开源仓库提交，当前包含 Arm GNU Toolchain 15.2.Rel1、OpenOCD 0.12.0、cfg 和 SVD 资源，体积约 1.14 GiB。第三方组件保留各自许可证；发布前请阅读 `doc/03-第三方工具链.md`。
+`runtime/` 跟随开源仓库提交，当前包含 OpenOCD 0.12.0、附加 cfg 和 SVD 资源。ELF/DWARF 由 `pyelftools` 直接解析，项目不需要 ARM GCC、GDB、NM、objdump 或 readelf，因此不再携带体积庞大的交叉编译工具链。第三方组件保留各自许可证；发布前请阅读 `doc/03-第三方工具链.md`。

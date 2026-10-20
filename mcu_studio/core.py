@@ -535,7 +535,6 @@ class ElfDatabase:
 class ProjectConfig:
     def __init__(self):
         self.elf_path = ""
-        self.nm_path = ""
         self.backend_mode = "JLINK" 
         self.openocd_exe = ""
         self.interface = ""  

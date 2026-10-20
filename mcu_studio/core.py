@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import os
+import ipaddress
+import re
+import socket
 import sqlite3
 import struct
 import subprocess
 import sys
+import tempfile
+import time
+from pathlib import Path
 from typing import Any, Dict
 
 try:
@@ -26,7 +32,7 @@ MAX_TYPE_DEPTH = 24
 TCL_TERMINATOR = b"\x1a"
 
 
-def receive_tcl_response(sock, chunk_size=4096):
+def receive_tcl_response(sock, chunk_size=4096, max_bytes=1024 * 1024):
     """Read one complete OpenOCD TCL response, including fragmented packets."""
     chunks = bytearray()
     while TCL_TERMINATOR not in chunks:
@@ -34,39 +40,232 @@ def receive_tcl_response(sock, chunk_size=4096):
         if not block:
             raise ConnectionError("OpenOCD TCL connection closed")
         chunks.extend(block)
+        if len(chunks) > max_bytes:
+            raise RuntimeError("OpenOCD TCL response exceeded the 1 MiB safety limit")
     return bytes(chunks).split(TCL_TERMINATOR, 1)[0].decode("utf-8", errors="replace").strip()
 
 
-def launch_openocd(config):
-    """Start only the configured OpenOCD instance and retain its process handle."""
-    startupinfo = subprocess.STARTUPINFO()
+def openocd_scripts_dir(executable):
+    executable_dir = os.path.dirname(os.path.abspath(executable))
+    candidates = (
+        os.path.abspath(os.path.join(executable_dir, "../share/openocd/scripts")),
+        os.path.abspath(os.path.join(executable_dir, "scripts")),
+    )
+    return next((path for path in candidates if os.path.isdir(path)), candidates[0])
+
+
+def discover_openocd_configs(executable, subfolder):
+    """Return cfg paths relative to OpenOCD's interface/target directory."""
+    root = Path(openocd_scripts_dir(executable)) / subfolder
+    if not root.is_dir():
+        return []
+    return sorted(
+        (path.relative_to(root).as_posix() for path in root.rglob("*.cfg") if path.is_file()),
+        key=str.casefold,
+    )
+
+
+def default_openocd_executable():
+    """Locate the repository/release OpenOCD without depending on the CWD."""
+    launch_dir = Path(sys.argv[0]).resolve().parent
+    project_dir = Path(__file__).resolve().parent.parent
+    candidates = (
+        launch_dir / "runtime" / "OpenOCD" / "bin" / "openocd.exe",
+        launch_dir.parent / "runtime" / "OpenOCD" / "bin" / "openocd.exe",
+        project_dir / "runtime" / "OpenOCD" / "bin" / "openocd.exe",
+    )
+    match = next((path for path in candidates if path.is_file()), candidates[0])
+    return os.path.normpath(str(match))
+
+
+def resolve_openocd_config(executable, value, subfolder):
+    value = str(value or "").strip()
+    if not value:
+        raise ValueError(f"OpenOCD {subfolder} cfg 不能为空")
+    if os.path.isabs(value):
+        path = os.path.abspath(os.path.expanduser(value))
+    else:
+        relative = value.replace("\\", "/")
+        prefix = f"{subfolder}/"
+        if relative.casefold().startswith(prefix.casefold()):
+            path = os.path.join(openocd_scripts_dir(executable), *relative.split("/"))
+        else:
+            path = os.path.join(openocd_scripts_dir(executable), subfolder, *relative.split("/"))
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"找不到 OpenOCD {subfolder} cfg：{path}")
+    return os.path.normpath(path)
+
+
+def validate_openocd_config(config):
+    executable_value = str(config.openocd_exe or "").strip()
+    if not executable_value:
+        raise FileNotFoundError("OpenOCD 路径未设置")
+    executable = os.path.abspath(os.path.expanduser(executable_value))
+    if not os.path.isfile(executable):
+        raise FileNotFoundError(f"找不到 OpenOCD：{executable or '(未设置)'}")
+    if os.path.basename(executable).casefold() != "openocd.exe":
+        raise ValueError(f"OpenOCD 路径必须指向 openocd.exe：{executable}")
+    try:
+        host = str(ipaddress.ip_address(str(config.openocd_host).strip()))
+    except ValueError as exc:
+        raise ValueError(f"无效的 OpenOCD 监听地址：{config.openocd_host}") from exc
+    if not ipaddress.ip_address(host).is_loopback:
+        raise ValueError("OpenOCD TCL 仅允许绑定本机回环地址")
+    port = int(config.tcl_port)
+    if not 1 <= port <= 65535:
+        raise ValueError(f"无效的 OpenOCD TCL 端口：{port}")
+    return {
+        "executable": executable,
+        "scripts": openocd_scripts_dir(executable),
+        "interface": resolve_openocd_config(executable, config.interface, "interface"),
+        "target": resolve_openocd_config(executable, config.target, "target"),
+        "host": host,
+        "port": port,
+    }
+
+
+def connect_openocd_tcl(config, timeout=0.5):
+    """Connect to the configured TCL service and verify that it is OpenOCD."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((config.openocd_host, int(config.tcl_port)))
+        sock.sendall(b"version\x1a")
+        response = receive_tcl_response(sock)
+        if "Open On-Chip Debugger" not in response:
+            raise ConnectionError("TCL 端口响应不是 OpenOCD")
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
+def _openocd_log_tail(config, limit=4000):
+    handle = getattr(config, "openocd_log_handle", None)
+    if handle:
+        try:
+            handle.flush()
+        except OSError:
+            pass
+    path = getattr(config, "openocd_log_path", "")
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")[-limit:]
+    except OSError:
+        return ""
+
+
+def _close_openocd_log(config, remove=True):
+    handle = getattr(config, "openocd_log_handle", None)
+    if handle:
+        try:
+            handle.close()
+        except OSError:
+            pass
+    config.openocd_log_handle = None
+    path = getattr(config, "openocd_log_path", "")
+    if remove and path:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        config.openocd_log_path = ""
+
+
+def launch_openocd(config, startup_timeout=5.0):
+    """Start, identify, and retain only the configured OpenOCD instance."""
+    details = validate_openocd_config(config)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((details["host"], details["port"]))
+        except OSError as exc:
+            raise RuntimeError(
+                f"OpenOCD TCL 端口 {details['host']}:{details['port']} 已被占用；"
+                "为避免误连其他调试进程，已取消启动。"
+            ) from exc
+
+    startupinfo = subprocess.STARTUPINFO() if os.name == "nt" else None
     creationflags = 0
     if config.show_log_window:
         creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-    else:
+    elif startupinfo is not None:
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = subprocess.SW_HIDE
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    config.openocd_process = subprocess.Popen(
-        [config.openocd_exe] + config.get_openocd_args(),
-        startupinfo=startupinfo,
-        creationflags=creationflags,
-    )
-    return config.openocd_process
+
+    popen_kwargs = {}
+    if not config.show_log_window:
+        descriptor, log_path = tempfile.mkstemp(prefix="mcu_studio_openocd_", suffix=".log")
+        log_handle = os.fdopen(descriptor, "w+", encoding="utf-8", errors="replace")
+        config.openocd_log_path = log_path
+        config.openocd_log_handle = log_handle
+        popen_kwargs.update(stdout=log_handle, stderr=subprocess.STDOUT)
+    try:
+        config.openocd_process = subprocess.Popen(
+            [details["executable"]] + config.get_openocd_args(),
+            cwd=os.path.dirname(details["executable"]),
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+            **popen_kwargs,
+        )
+        deadline = time.monotonic() + max(0.5, float(startup_timeout))
+        last_error = ""
+        while time.monotonic() < deadline:
+            return_code = config.openocd_process.poll()
+            if return_code is not None:
+                log = _openocd_log_tail(config)
+                raise RuntimeError(
+                    f"OpenOCD 启动失败，退出码 {return_code}。\n{log or '没有可用日志。'}"
+                )
+            try:
+                test_socket = connect_openocd_tcl(config, timeout=0.3)
+                test_socket.close()
+                return config.openocd_process
+            except (OSError, RuntimeError, ConnectionError) as exc:
+                last_error = str(exc)
+                time.sleep(0.1)
+        log = _openocd_log_tail(config)
+        raise RuntimeError(
+            f"OpenOCD 在 {startup_timeout:.1f} 秒内未就绪：{last_error}\n"
+            f"{log or '没有可用日志。'}"
+        )
+    except Exception:
+        stop_managed_openocd(config)
+        raise
 
 
 def stop_managed_openocd(config):
     process = getattr(config, "openocd_process", None)
-    if process is None or process.poll() is not None:
-        return
-    process.terminate()
     try:
-        process.wait(timeout=1.0)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=1.0)
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2.0)
     finally:
         config.openocd_process = None
+        _close_openocd_log(config)
+
+
+def jlink_dll_path(jlink_dir):
+    """Return the DLL matching this Python process; never fall back across bitness."""
+    directory_value = str(jlink_dir or "").strip()
+    if not directory_value:
+        raise FileNotFoundError("J-Link 目录未设置")
+    directory = os.path.abspath(os.path.expanduser(directory_value))
+    if not os.path.isdir(directory):
+        raise FileNotFoundError(f"找不到 J-Link 目录：{directory or '(未设置)'}")
+    dll_name = "JLink_x64.dll" if struct.calcsize("P") == 8 else "JLinkARM.dll"
+    path = os.path.join(directory, dll_name)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"当前 Python 为 {struct.calcsize('P') * 8} 位，需要同位数 J-Link DLL：{path}"
+        )
+    return path
 
 
 def decode_sample_value(raw_value, channel):
@@ -80,6 +279,44 @@ def decode_sample_value(raw_value, channel):
     if channel["is_signed"] and value & (1 << (bits - 1)):
         value -= 1 << bits
     return float(value)
+
+
+def decode_openocd_memory_response(response, channels, block_start=None, word_count=None):
+    """Decode OpenOCD mdw/mdh/mdb output with the same scalar rules as J-Link."""
+    if "ERROR" in response.upper():
+        raise RuntimeError("OpenOCD memory read failed")
+    lines = [line.strip() for line in response.splitlines() if ":" in line]
+    packet = {}
+    if block_start is not None:
+        words = []
+        for line in lines:
+            words.extend(int(token, 16) for token in line.split(":", 1)[1].strip().split())
+        expected = int(word_count or 0)
+        if len(words) < expected:
+            raise RuntimeError("OpenOCD block read returned too few words")
+        for channel in channels:
+            offset = channel["addr"] - block_start
+            index, byte_offset = divmod(offset, 4)
+            raw_value = (words[index] >> (byte_offset * 8)) & ((1 << (channel["width"] * 8)) - 1)
+            packet[channel["ch_idx"]] = decode_sample_value(raw_value, channel)
+        return packet
+
+    if len(lines) != len(channels):
+        raise RuntimeError("OpenOCD returned an unexpected number of memory rows")
+    for line, channel in zip(lines, channels):
+        tokens = line.split(":", 1)[1].strip().split()
+        if channel.get("byte_read") or channel["width"] > 4:
+            if len(tokens) < channel["width"]:
+                raise RuntimeError("OpenOCD byte read returned too few bytes")
+            raw_value = int.from_bytes(
+                bytes(int(token, 16) & 0xFF for token in tokens[:channel["width"]]), "little"
+            )
+        else:
+            if not tokens:
+                raise RuntimeError("OpenOCD memory read returned no value")
+            raw_value = int(tokens[0], 16)
+        packet[channel["ch_idx"]] = decode_sample_value(raw_value, channel)
+    return packet
 
 
 def type_label(type_info: Dict[str, Any]) -> str:
@@ -311,23 +548,28 @@ class ProjectConfig:
         self.tcl_port = 6666
         self.show_log_window = False  
         self.openocd_process = None
+        self.openocd_log_handle = None
+        self.openocd_log_path = ""
         self.theme_mode = "DARK"
 
     def get_openocd_args(self):
-        exe_dir = os.path.dirname(self.openocd_exe) if self.openocd_exe else ""
-        scripts_path = os.path.abspath(os.path.join(exe_dir, "../share/openocd/scripts"))
-        if not os.path.exists(scripts_path): scripts_path = os.path.abspath(os.path.join(exe_dir, "scripts"))
-        
-        args = ["-s", scripts_path, "-c", f"bindto {self.openocd_host}", "-c", f"tcl_port {self.tcl_port}", "-c", "gdb_port 3333"]
-        if ":" in self.interface or "/" in self.interface or "\\" in self.interface:
-            args += ["-f", self.interface]
-        else:
-            args += ["-f", f"interface/{self.interface}"]
-
-        if ":" in self.target or "/" in self.target or "\\" in self.target:
-            args += ["-f", self.target]
-        else:
-            args += ["-f", f"target/{self.target}"]
+        details = validate_openocd_config(self)
+        search_dirs = [details["scripts"]]
+        for config_path in (details["interface"], details["target"]):
+            config_dir = os.path.dirname(config_path)
+            if config_dir not in search_dirs:
+                search_dirs.append(config_dir)
+        args = []
+        for search_dir in search_dirs:
+            args.extend(("-s", search_dir))
+        args.extend([
+            "-c", f"bindto {details['host']}",
+            "-c", f"tcl port {details['port']}",
+            "-c", "gdb port disabled",
+            "-c", "telnet port disabled",
+            "-f", details["interface"],
+            "-f", details["target"],
+        ])
         return args
 
 class LiveWatchDB:
@@ -348,18 +590,54 @@ class LiveWatchDB:
         self.cursor.execute('CREATE TABLE IF NOT EXISTS config_cache (key TEXT PRIMARY KEY, value TEXT)')
         self.cursor.execute('CREATE TABLE IF NOT EXISTS c_code_cache (id INTEGER PRIMARY KEY, code TEXT)')
         self.conn.commit()
+        self._vars_cache = None
+
+    def _invalidate_vars_cache(self):
+        self._vars_cache = None
 
     def save_var(self, name, var_type, offset=0, base_var="", tab_idx=0):
         self.cursor.execute("INSERT OR REPLACE INTO variables (name, type, offset, base_var, tab_idx) VALUES (?, ?, ?, ?, ?)", (name, var_type, offset, base_var, tab_idx))
         self.conn.commit()
+        self._invalidate_vars_cache()
 
     def delete_var(self, name, tab_idx=0):
         self.cursor.execute("DELETE FROM variables WHERE name=? AND tab_idx=?", (name, tab_idx))
         self.conn.commit()
+        self._invalidate_vars_cache()
 
     def get_all_vars(self):
-        self.cursor.execute("SELECT name, type, offset, base_var, tab_idx FROM variables")
-        return self.cursor.fetchall()
+        if self._vars_cache is None:
+            self.cursor.execute("SELECT name, type, offset, base_var, tab_idx FROM variables")
+            self._vars_cache = self.cursor.fetchall()
+        return list(self._vars_cache)
+
+    def get_var_map(self, tab_idx):
+        return {
+            row[0]: (row[2], row[3], row[1])
+            for row in self.get_all_vars()
+            if int(row[4]) == int(tab_idx)
+        }
+
+    def get_var_type(self, name, tab_idx):
+        for row in self.get_all_vars():
+            if row[0] == name and int(row[4]) == int(tab_idx):
+                return row[1]
+        return None
+
+    def replace_root_vars(self, root, tab_idx, records):
+        """Replace one expanded root in a single transaction."""
+        self.cursor.execute(
+            "DELETE FROM variables WHERE tab_idx=? AND "
+            "(name=? OR substr(name, 1, length(?) + 1)=? || '.' "
+            "OR substr(name, 1, length(?) + 1)=? || '[')",
+            (tab_idx, root, root, root, root, root),
+        )
+        self.cursor.executemany(
+            "INSERT OR REPLACE INTO variables (name, type, offset, base_var, tab_idx) VALUES (?, ?, ?, ?, ?)",
+            ((record["path"], record["type"], record["offset"], root, tab_idx) for record in records),
+        )
+        self.conn.commit()
+        self._invalidate_vars_cache()
 
     def save_config(self, key, value):
         self.cursor.execute("INSERT OR REPLACE INTO config_cache (key, value) VALUES (?, ?)", (key, value))

@@ -8,6 +8,7 @@ artifacts/
 
 # 用户本地数据
 data/*.db
+/live_watch_history.db
 
 # 临时打包和日志文件
 *.log

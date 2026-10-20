@@ -14,5 +14,8 @@ data/*.db
 *.log
 *.tmp
 
+# 本地工具链压缩包（解压后的 runtime/OpenOCD/ 才跟随仓库）
+/runtime/OpenOCD.zip
+
 
 

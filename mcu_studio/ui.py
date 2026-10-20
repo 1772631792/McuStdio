@@ -122,23 +122,39 @@ class FloatingDebugWindow(QDialog):
         self.setWindowTitle(f"{title} — 悬浮调试")
         self.resize(620, 680)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(7, 7, 7, 7)
-        hint = QLabel("关闭此悬浮窗口后，将自动回到原调试标签。")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setStyleSheet("padding: 6px; color: #90a4ae;")
-        layout.addWidget(hint)
+        layout.setContentsMargins(4, 4, 4, 4)
+        tree.setParent(self)
         layout.addWidget(tree)
+        # QTabWidget.removeTab() hides its page.  Reparenting alone does not
+        # reliably clear that explicit hidden state, so make the complete
+        # interactive watch tree visible in the floating window.
+        tree.show()
 
     def closeEvent(self, event):
         if not self._reattaching:
             self.reattach_requested.emit(self.slot)
         event.accept()
 
+    def keyPressEvent(self, event):
+        owner = self.parent()
+        tree = owner.debug_trees.get(self.slot) if owner and hasattr(owner, "debug_trees") else None
+        if event.key() == Qt.Key.Key_Delete and tree is not None:
+            item = tree.currentItem()
+            if item is not None:
+                while item.parent():
+                    item = item.parent()
+                owner.remove_variable_root(item, tree)
+            return
+        if event.key() == Qt.Key.Key_Space and owner and hasattr(owner, "toggle_freeze"):
+            owner.toggle_freeze()
+            return
+        super().keyPressEvent(event)
+
 
 
 class ElfVariableDialog(QDialog):
     MAX_VISIBLE_RESULTS = 2000
-    symbol_selected_signal = pyqtSignal(str)
+    symbol_selected_signal = pyqtSignal(str, int)
     reload_requested_signal = pyqtSignal()
     def __init__(self, elf_db, parent=None):
         super().__init__(parent); self.elf_db = elf_db
@@ -146,12 +162,14 @@ class ElfVariableDialog(QDialog):
         layout = QVBoxLayout(self); self.search = QLineEdit(); self.search.setPlaceholderText("搜索 ELF 全局变量…"); layout.addWidget(self.search)
         self.elf_status = QLabel(); layout.addWidget(self.elf_status)
         self.tree = QTreeWidget(); self.tree.setColumnCount(4); self.tree.setHeaderLabels(["变量", "DWARF 类型", "地址", "存储属性"]); self.tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); layout.addWidget(self.tree)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_add_menu)
         buttons = QHBoxLayout()
         reload_button = QPushButton("🔄 重新提取当前 ELF")
         reload_button.setToolTip("重新读取当前 ELF 的符号表和 DWARF，并刷新已有监视变量的地址与结构")
         reload_button.clicked.connect(lambda: self.reload_requested_signal.emit())
         buttons.addWidget(reload_button); buttons.addStretch()
-        add = QPushButton("添加选中变量到监视"); add.clicked.connect(self._accept_item); buttons.addWidget(add); layout.addLayout(buttons)
+        add = QPushButton("添加到当前调试窗口"); add.clicked.connect(lambda: self._accept_item()); buttons.addWidget(add); layout.addLayout(buttons)
         self._sorted_symbol_names = sorted(self.elf_db.symbols, key=str.casefold)
         self.search_timer = QTimer(self)
         self.search_timer.setSingleShot(True)
@@ -183,9 +201,28 @@ class ElfVariableDialog(QDialog):
         self.elf_db = elf_db
         self._sorted_symbol_names = sorted(self.elf_db.symbols, key=str.casefold)
         self._fill()
-    def _accept_item(self):
+    def _show_add_menu(self, pos):
+        item = self.tree.itemAt(pos)
+        if item is None:
+            return
+        self.tree.setCurrentItem(item)
+        menu = QMenu(self)
+        menu.setStyleSheet(self.parent().popup_menu_style if hasattr(self.parent(), "popup_menu_style") else "")
+        actions = [
+            menu.addAction("添加到主调试窗口"),
+            menu.addAction("添加到调试窗口 2"),
+            menu.addAction("添加到调试窗口 3"),
+        ]
+        selected = menu.exec(self.tree.viewport().mapToGlobal(pos))
+        if selected in actions:
+            self._accept_item(actions.index(selected), close_dialog=False)
+
+    def _accept_item(self, target_slot=-1, close_dialog=True):
         item = self.tree.currentItem()
-        if item: self.symbol_selected_signal.emit(item.data(0, Qt.ItemDataRole.UserRole)); self.close()
+        if item:
+            self.symbol_selected_signal.emit(item.data(0, Qt.ItemDataRole.UserRole), int(target_slot))
+            if close_dialog:
+                self.close()
 
 
 
@@ -959,9 +996,8 @@ class MCUStudioWindow(QMainWindow):
                 if not base_var.startswith(("0x", "0X")) and base_var not in self.symbol_cache:
                     self.db.delete_var(path, tab_idx)
 
-            for tab_index in range(self.tab_widget.count()):
-                tree = self.debug_trees.get(tab_index)
-                if tree: tree.clear()
+            for tree in self.debug_trees.values():
+                tree.clear()
             self.load_history_from_db()
 
             current_rows = {row[0]: row for row in self.db.get_all_vars()}
@@ -1130,8 +1166,22 @@ class MCUStudioWindow(QMainWindow):
             return "ERROR"
 
     def get_current_tree(self):
-        index = self.tab_widget.currentIndex()
-        return self.debug_trees.get(index, self.tab_widget.currentWidget())
+        widget = self.tab_widget.currentWidget()
+        return widget if isinstance(widget, QTreeWidget) else None
+
+    def current_debug_slot(self):
+        tree = self.get_current_tree()
+        if tree is None:
+            return None
+        slot = tree.property("debug_tab_slot")
+        return int(slot) if slot is not None else None
+
+    @staticmethod
+    def debug_slot_for_tree(tree):
+        if not isinstance(tree, QTreeWidget):
+            return None
+        slot = tree.property("debug_tab_slot")
+        return int(slot) if slot is not None else None
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key.Key_Delete:
@@ -1361,10 +1411,10 @@ class MCUStudioWindow(QMainWindow):
         self.setCentralWidget(main_widget)
 
     def create_new_debug_tab(self, name=None):
-        if self.tab_widget.count() >= 3:
+        if len(self.debug_trees) >= 3:
             QMessageBox.warning(self, "标签页上限", "最多只允许开启 3 个变量调试窗口。")
             return
-        slot = self.tab_widget.count()
+        slot = next(index for index in range(3) if index not in self.debug_trees)
         if not name: name = f"调试窗口 {slot + 1}"
             
         tree = QTreeWidget()
@@ -1381,19 +1431,15 @@ class MCUStudioWindow(QMainWindow):
         self.debug_titles[slot] = name
         self.tab_widget.setCurrentIndex(new_idx)
 
-    def detach_debug_tab(self, slot):
+    def detach_debug_tab(self, tab_index):
+        tree = self.tab_widget.widget(tab_index)
+        slot = self.debug_slot_for_tree(tree)
+        if slot is None:
+            return
         if slot not in self.debug_trees or slot in self.detached_debug_windows:
             return
-        tree = self.debug_trees[slot]
         title = self.debug_titles[slot]
-        if self.tab_widget.widget(slot) is not tree:
-            return
-        self.tab_widget.removeTab(slot)
-        placeholder = QLabel(f"“{title}”正在悬浮\n关闭悬浮窗口后自动返回")
-        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        placeholder.setProperty("detached_debug_placeholder", True)
-        self.tab_widget.insertTab(slot, placeholder, title)
-        self.tab_widget.setCurrentIndex(slot)
+        self.tab_widget.removeTab(tab_index)
 
         window = FloatingDebugWindow(slot, title, tree, self)
         window.reattach_requested.connect(self.attach_debug_tab)
@@ -1411,9 +1457,15 @@ class MCUStudioWindow(QMainWindow):
         window._reattaching = True
         window.layout().removeWidget(tree)
         tree.setParent(None)
-        self.tab_widget.removeTab(slot)
-        self.tab_widget.insertTab(slot, tree, title)
-        self.tab_widget.setCurrentIndex(slot)
+        insert_index = self.tab_widget.count()
+        for index in range(self.tab_widget.count()):
+            other_slot = self.debug_slot_for_tree(self.tab_widget.widget(index))
+            if other_slot is not None and other_slot > slot:
+                insert_index = index
+                break
+        self.tab_widget.insertTab(insert_index, tree, title)
+        tree.show()
+        self.tab_widget.setCurrentIndex(insert_index)
         window.close()
         window.deleteLater()
         self.restart_sampling_thread()
@@ -1983,7 +2035,9 @@ class MCUStudioWindow(QMainWindow):
         self.restart_sampling_thread()
 
     def show_context_menu(self, pos):
-        tree = self.get_current_tree()
+        tree = self.sender()
+        if not isinstance(tree, QTreeWidget):
+            tree = self.get_current_tree()
         if not tree: return
         item = tree.itemAt(pos)
         if not item: return
@@ -2018,7 +2072,7 @@ class MCUStudioWindow(QMainWindow):
         elif act == m_del:
             root_item = item
             while root_item.parent(): root_item = root_item.parent()
-            self.remove_variable_root(root_item)
+            self.remove_variable_root(root_item, tree)
 
     def bind_tree_item_to_channel(self, ch_idx, item):
         path = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
@@ -2078,8 +2132,8 @@ class MCUStudioWindow(QMainWindow):
         name = self.input_name.text().strip()
         v_type = self.input_type.currentText()
         if not name: return
-        current_tab_idx = self.tab_widget.currentIndex()
-        if current_tab_idx < 0: return
+        current_tab_idx = self.current_debug_slot()
+        if current_tab_idx is None: return
 
         if name.startswith("0x") or name.startswith("0X"):
             self.db.save_var(name, v_type, 0, name, current_tab_idx)
@@ -2104,9 +2158,9 @@ class MCUStudioWindow(QMainWindow):
         )
         self.adv_parse_dialog.show()
 
-    def add_elf_variable(self, root):
-        current_tab_idx = self.tab_widget.currentIndex()
-        if current_tab_idx < 0: return
+    def add_elf_variable(self, root, target_slot=-1):
+        current_tab_idx = self.current_debug_slot() if target_slot is None or int(target_slot) < 0 else int(target_slot)
+        if current_tab_idx not in self.debug_trees: return
         try: records = self.elf_db.flatten(root)
         except Exception as exc:
             QMessageBox.warning(self, "ELF 变量解析失败", str(exc)); return
@@ -2138,16 +2192,19 @@ class MCUStudioWindow(QMainWindow):
         has_children = any(p.startswith(path + ".") or p.startswith(path + "[") for p in all_db_paths if p != path)
         if has_children: return
         
-        tree = self.get_current_tree()
+        tree = self.sender()
+        if not isinstance(tree, QTreeWidget):
+            tree = self.get_current_tree()
+        if tree is None: return
         initial_text = val_text
         if type_info and type_info.get("kind") == "enum" and " (" in initial_text: initial_text = initial_text.rsplit(" (", 1)[0]
         editor = InPlaceEditLineEdit(tree, initial_text, v_type, type_info)
         tree.setItemWidget(item, column, editor)
         editor.setFocus()
-        editor.editing_finished_signal.connect(lambda text: self.finish_tree_item_editing(item, column, text))
+        editor.editing_finished_signal.connect(lambda text, source_tree=tree: self.finish_tree_item_editing(item, column, text, source_tree))
 
-    def finish_tree_item_editing(self, item, column, new_text):
-        tree = self.get_current_tree()
+    def finish_tree_item_editing(self, item, column, new_text, tree=None):
+        tree = tree or self.get_current_tree()
         if tree: tree.removeItemWidget(item, column)
         if not new_text: return 
         
@@ -2181,8 +2238,10 @@ class MCUStudioWindow(QMainWindow):
             item.setText(2, new_text)
         except: pass
 
-    def remove_variable_root(self, root_item):
-        current_tab_idx = self.tab_widget.currentIndex()
+    def remove_variable_root(self, root_item, tree=None):
+        tree = tree or self.get_current_tree()
+        current_tab_idx = self.debug_slot_for_tree(tree)
+        if current_tab_idx is None: return
         root_name = root_item.text(0)
         for path, _, _, _, t_idx in self.db.get_all_vars():
             # 💡 【完美修复】：彻底移除掉混入的 nudge 噪声单词，恢复纯净的逻辑判断
@@ -2191,7 +2250,6 @@ class MCUStudioWindow(QMainWindow):
                 for i in range(3):
                     if self.ch_paths[i] == path: self.unbind_channel(i)
                         
-        tree = self.get_current_tree()
         if tree:
             index = tree.indexOfTopLevelItem(root_item)
             if index >= 0: tree.takeTopLevelItem(index)
@@ -2248,8 +2306,8 @@ class MCUStudioWindow(QMainWindow):
 
     def low_speed_tree_refresh(self):
         if self.layout_switching or self.backend_suspended: return
-        current_tab = self.tab_widget.currentIndex()
-        active_tabs = {current_tab}
+        current_tab = self.current_debug_slot()
+        active_tabs = {current_tab} if current_tab is not None else set()
         active_tabs.update(
             slot for slot, window in self.detached_debug_windows.items()
             if window.isVisible()

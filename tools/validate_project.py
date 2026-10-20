@@ -59,6 +59,11 @@ def validate_imports_and_elf_helpers() -> None:
         dialog.tree.topLevelItemCount() == dialog.MAX_VISIBLE_RESULTS,
         "large ELF browser bounds the number of rendered rows",
     )
+    selected_targets = []
+    dialog.symbol_selected_signal.connect(lambda name, slot: selected_targets.append((name, slot)))
+    dialog.tree.setCurrentItem(dialog.tree.topLevelItem(0))
+    dialog._accept_item(2, close_dialog=False)
+    check(selected_targets and selected_targets[-1][1] == 2, "ELF browser can target any debug window")
     dialog.close()
     application.processEvents()
     with tempfile.TemporaryDirectory() as directory, patch.object(sys, "argv", [str(Path(directory) / "main.py")]):
@@ -94,12 +99,19 @@ def validate_imports_and_elf_helpers() -> None:
         studio.detach_debug_tab(1)
         application.processEvents()
         check(
-            1 in studio.detached_debug_windows and studio.tab_widget.widget(1) is not original_tree,
-            "double-click action detaches a debug tab into a floating window",
+            1 in studio.detached_debug_windows and studio.tab_widget.count() == 2,
+            "detaching removes the tab from the main tab bar",
         )
+        floating_window = studio.detached_debug_windows[1]
+        check(original_tree.parent() is floating_window and original_tree.isVisible(), "floating window shows the complete debug tree")
+        studio.elf_db = database
+        studio.symbol_cache = dict(database.symbols)
+        studio.add_elf_variable("value", 1)
+        check(original_tree.topLevelItemCount() == 1, "ELF variable can be added to a detached debug window")
+        check(studio.debug_slot_for_tree(studio.tab_widget.widget(1)) == 2, "remaining tab indices keep their logical window slots")
         studio.detached_debug_windows[1].close()
         application.processEvents()
-        check(studio.tab_widget.widget(1) is original_tree, "closing a floating debug window restores its original tab")
+        check(studio.tab_widget.count() == 3 and studio.tab_widget.widget(1) is original_tree, "closing a floating window restores the tab in order")
         studio.close()
         application.processEvents()
         test_database.conn.close()

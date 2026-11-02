@@ -55,7 +55,17 @@ def validate_imports_and_elf_helpers() -> None:
     import mcu_studio.workers as workers
 
     check(ui.MCUStudioWindow.__name__ == "MCUStudioWindow", "UI module imports")
+    check(
+        ui.QMessageBox is ui.SilentMessageBox,
+        "application dialogs use the silent message box implementation",
+    )
     check(workers.ElfFlashWorker.__name__ == "ElfFlashWorker", "worker module imports")
+    check(workers.OpenOcdFlashWorker.__name__ == "OpenOcdFlashWorker", "OpenOCD flash worker imports")
+    check(
+        workers.LowSpeedReadWorker.__name__ == "LowSpeedReadWorker"
+        and workers.BackendReconnectWorker.__name__ == "BackendReconnectWorker",
+        "non-blocking read and reconnect workers import",
+    )
     database = core.ElfDatabase()
     database.symbols = {"value": 0x20000000}
     database.types = {"value": {"kind": "scalar", "name": "uint32_t", "size": 4}}
@@ -136,6 +146,13 @@ def validate_imports_and_elf_helpers() -> None:
             and studio.rad_map1.isCheckable(),
             "waveform controls use the compact plot toolbar",
         )
+        studio._set_flash_progress("success")
+        check(
+            studio.lbl_flash_progress.text() == "DOWNLOAD OK"
+            and studio.flash_progress.value() == 100,
+            "flash result is shown in the compact bottom progress strip",
+        )
+        studio._set_flash_progress("idle")
         bottom_axis = studio.plot_widgets[0].getAxis("bottom")
         check(
             "ms" in bottom_axis.labelText and not bottom_axis.labelUnits,
@@ -156,7 +173,8 @@ def validate_imports_and_elf_helpers() -> None:
         studio.plot_active_paths[1].remove("layout-test")
         original_reconnect_style = studio.btn_reconnect.styleSheet()
         studio._execute_flash_animation(studio.btn_reconnect, "#0a84ff")
-        QTest.qWait(260)
+        # Leave margin beyond the 220 ms animation duration for busy CI hosts.
+        QTest.qWait(400)
         check(
             studio.btn_reconnect.text() == "重连"
             and studio.btn_reconnect.styleSheet() == original_reconnect_style,
@@ -171,6 +189,15 @@ def validate_imports_and_elf_helpers() -> None:
             studio.canvas_fixed_ranges[0] is not None
             and studio.lbl_status_text.text().startswith("已适配"),
             "waveform fit uses buffered data immediately without a delay timer",
+        )
+        plot_x, plot_y = studio._display_plot_data(
+            list(range(40_000)),
+            [99.0 if index == 12_345 else float(index % 17) for index in range(40_000)],
+            0,
+        )
+        check(
+            len(plot_x) <= 4_000 and 99.0 in plot_y,
+            "waveform rendering bounds point count while preserving peaks",
         )
         studio.db.save_var("shared_value", "uint32", 0, "0x20000000", 0)
         studio.db.save_var("shared_value", "uint32", 0, "0x20000000", 1)
@@ -316,6 +343,51 @@ def validate_openocd_configuration() -> None:
             check(not popen.called, "port collision cannot start or connect to another process")
 
 
+def validate_openocd_flash_worker() -> None:
+    from mcu_studio import workers
+    from mcu_studio.core import ProjectConfig
+
+    config = ProjectConfig()
+    config.backend_mode = "OPENOCD"
+    config.openocd_exe = str(PROJECT_ROOT / "runtime" / "OpenOCD" / "bin" / "openocd.exe")
+    config.interface = "cmsis-dap.cfg"
+    config.target = "stm32f0x.cfg"
+    captured = {}
+    emitted = []
+
+    with tempfile.TemporaryDirectory() as directory:
+        firmware = Path(directory) / "firmware build.elf"
+        firmware.touch()
+        worker = workers.OpenOcdFlashWorker(config, str(firmware))
+        worker.finished_signal.connect(
+            lambda success, message, ready: emitted.append((success, message, ready))
+        )
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            return subprocess.CompletedProcess(
+                command, 0, "** Programming Finished **\n** Verified OK **"
+            )
+
+        with patch.object(workers, "stop_managed_openocd") as stop, patch.object(
+            workers, "launch_openocd"
+        ) as launch, patch.object(workers.subprocess, "run", side_effect=fake_run):
+            worker.run()
+
+    flash_command = captured["command"][-1]
+    check(
+        stop.call_count == 1 and launch.call_count == 1,
+        "OpenOCD flash worker stops and restores the managed debug backend",
+    )
+    check(
+        emitted and emitted[0][0] and emitted[0][2]
+        and flash_command.startswith('program "')
+        and flash_command.endswith('" verify reset exit')
+        and "\\" not in flash_command,
+        "OpenOCD flash worker programs, verifies and resets the selected ELF",
+    )
+
+
 def validate_jlink_bitness_and_flash_command() -> None:
     import mcu_studio.core as core
     import mcu_studio.workers as workers
@@ -399,6 +471,7 @@ def main() -> int:
     validate_imports_and_elf_helpers()
     validate_tcl_protocol()
     validate_openocd_configuration()
+    validate_openocd_flash_worker()
     validate_jlink_bitness_and_flash_command()
     validate_large_watch_database()
     validate_no_second_qt_binding()

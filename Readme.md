@@ -10,7 +10,7 @@ MCU Live Watch Studio 是面向 Cortex-M 单片机的实时变量观测与波形
 - 固定三个调试窗口；双击标签可弹出独立悬浮窗口，关闭后自动回到原标签。
 - 表格低速监视和标量写入；三通道高速曲线支持单图、双图和三图布局。
 - 自定义采样率、锁定滚动、自适应画布、断开后端、通信重连和手动复位。
-- J-Link 原生后端支持 ELF 烧录；普通连接、采样和重连不会主动执行烧录或复位。
+- J-Link 原生和 OpenOCD 后端均支持后台 ELF 烧录、校验与复位；普通连接、采样和重连不会主动执行烧录或复位。
 - OpenOCD 支持 ST-Link、DAPLink/CMSIS-DAP、J-Link adapter，以及自选 interface/target cfg。
 - 常用 STM32 F1/F2/F3/F4/H7 target 可直接选择，其他 MCU 可使用厂商提供的 cfg。
 - ELF 更新后自动重新提取符号并刷新已保存变量地址。
@@ -21,9 +21,9 @@ MCU Live Watch Studio 是面向 Cortex-M 单片机的实时变量观测与波形
 | 后端 | 推荐探针 | 主要用途 | 说明 |
 | --- | --- | --- | --- |
 | J-Link 原生 | SEGGER J-Link | 变量读写、波形、复位、ELF 烧录 | 使用 SEGGER DLL 和原始设备名，Windows 下优先推荐 |
-| OpenOCD | ST-Link | 变量读写、波形、复位 | 选择正确的 interface 和 target cfg |
-| OpenOCD | DAPLink/CMSIS-DAP | 变量读写、波形、复位 | 选择 CMSIS-DAP interface 和芯片 target cfg |
-| OpenOCD | J-Link | 变量读写、波形、复位 | Windows 下需要 libusb 驱动，与 SEGGER 官方驱动通常不兼容 |
+| OpenOCD | ST-Link | 变量读写、波形、复位、ELF 烧录 | 选择正确的 interface 和 target cfg |
+| OpenOCD | DAPLink/CMSIS-DAP | 变量读写、波形、复位、ELF 烧录 | 选择 CMSIS-DAP interface 和芯片 target cfg |
+| OpenOCD | J-Link | 变量读写、波形、复位、ELF 烧录 | Windows 下需要 libusb 驱动，与 SEGGER 官方驱动通常不兼容 |
 
 ## 快速开始
 
@@ -63,7 +63,7 @@ python .\main.py
 - “锁定滚动”用于冻结当前时间窗，“自适应画布”重新匹配当前数据范围。
 - 空格键可暂停或恢复时间轴，十字光标用于回看时间戳和数值。
 - “断开后端”释放硬件连接，“通信重连”重新建立当前后端。
-- “复位”会影响目标芯片运行；“烧录”仅在 J-Link 原生模式可用，并会擦写 Flash 后复位运行，操作前均应确认设备安全。
+- “复位”会影响目标芯片运行；“烧录”会暂停采样、擦写并校验 Flash，随后复位运行并恢复调试连接，操作前应确认设备安全。
 
 ## OpenOCD 与 J-Link 注意事项
 

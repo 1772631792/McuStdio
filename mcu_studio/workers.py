@@ -16,8 +16,11 @@ from .core import (
     decode_openocd_memory_response,
     decode_sample_value,
     jlink_dll_path,
+    launch_openocd,
     receive_tcl_response,
     scalar_size,
+    stop_managed_openocd,
+    validate_openocd_config,
 )
 
 try:
@@ -126,6 +129,74 @@ class ElfFlashWorker(QThread):
             self.finished_signal.emit(success, message, link)
 
 
+class OpenOcdFlashWorker(QThread):
+    """Flash an ELF and restore the managed OpenOCD debug instance."""
+
+    finished_signal = pyqtSignal(bool, str, bool)
+
+    def __init__(self, config, elf_path, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.elf_path = elf_path
+
+    def run(self):
+        success = False
+        backend_ready = False
+        message = ""
+        stopped = False
+        try:
+            details = validate_openocd_config(self.config)
+            if not os.path.isfile(self.elf_path):
+                raise FileNotFoundError(f"找不到 ELF：{self.elf_path}")
+            if any(character in self.elf_path for character in ('"', "\r", "\n")):
+                raise ValueError("ELF 路径不能包含双引号或换行符")
+
+            stopped = True
+            stop_managed_openocd(self.config)
+            openocd_elf = os.path.abspath(self.elf_path).replace("\\", "/")
+            command = [details["executable"], *self.config.get_openocd_args()]
+            command.extend(("-c", f'program "{openocd_elf}" verify reset exit'))
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            result = subprocess.run(
+                command,
+                cwd=os.path.dirname(details["executable"]),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                timeout=180,
+                creationflags=creationflags,
+            )
+            output = result.stdout or ""
+            output_lower = output.lower()
+            failed = result.returncode != 0 or any(
+                token in output_lower for token in (
+                    "** programming failed **",
+                    "verification failed",
+                    "failed to write",
+                    "failed to erase",
+                    "error: flash",
+                )
+            )
+            if failed:
+                message = output[-4000:] or f"OpenOCD 退出码：{result.returncode}"
+            else:
+                success = True
+                message = f"ELF 已通过 OpenOCD 烧录、校验并复位运行：\n{self.elf_path}"
+        except subprocess.TimeoutExpired:
+            message = "OpenOCD 烧录超过 180 秒，已停止等待。"
+        except Exception as exc:
+            message = str(exc)
+        finally:
+            if stopped:
+                try:
+                    launch_openocd(self.config)
+                    backend_ready = True
+                except Exception as exc:
+                    message += f"\n\n烧录后 OpenOCD 调试后端重启失败：{exc}"
+            self.finished_signal.emit(success, message, backend_ready)
+
+
 class BackendCloseWorker(QThread):
     """Release a native probe handle without ever blocking the Qt GUI thread."""
 
@@ -147,6 +218,116 @@ class BackendCloseWorker(QThread):
         finally:
             self.link = None
             self.finished_signal.emit(error)
+
+
+class BackendReconnectWorker(QThread):
+    """Recreate either backend without blocking the GUI thread."""
+
+    finished_signal = pyqtSignal(bool, str, object)
+
+    def __init__(self, config, jlink_lock=None, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.jlink_lock = jlink_lock or threading.RLock()
+
+    def run(self):
+        backend = None
+        try:
+            if self.config.backend_mode == "OPENOCD":
+                stop_managed_openocd(self.config)
+                launch_openocd(self.config)
+                backend = connect_openocd_tcl(self.config, timeout=0.5)
+            else:
+                if pylink is None:
+                    raise RuntimeError("缺少 pylink-square，无法连接 J-Link")
+                dll_file = jlink_dll_path(self.config.jlink_dll_dir)
+                backend = pylink.JLink(lib=pylink.library.Library(dllpath=dll_file))
+                with self.jlink_lock:
+                    backend.open()
+                    backend.set_tif(pylink.enums.JLinkInterfaces.SWD)
+                    backend.connect(self.config.jlink_connect_device, speed=4000)
+            self.finished_signal.emit(True, "", backend)
+        except Exception as exc:
+            if backend:
+                try:
+                    backend.close()
+                except Exception:
+                    pass
+            self.finished_signal.emit(False, str(exc), None)
+
+
+class LowSpeedReadWorker(QThread):
+    """Read visible table values without blocking the Qt event loop."""
+
+    finished_signal = pyqtSignal(object, str)
+
+    def __init__(self, config, requests, jlink_instance=None, jlink_lock=None, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.requests = list(requests)
+        self.jlink = jlink_instance
+        self.jlink_lock = jlink_lock or threading.RLock()
+        self.running = True
+        self.active_socket = None
+
+    @staticmethod
+    def _openocd_bytes(response, size):
+        values = []
+        for line in response.splitlines():
+            if ":" not in line:
+                continue
+            for token in line.split(":", 1)[1].split():
+                values.append(int(token, 16) & 0xFF)
+        if len(values) < size:
+            raise RuntimeError("OpenOCD 返回的内存字节不足")
+        return bytes(values[:size])
+
+    def run(self):
+        results = {}
+        error = ""
+        sock = None
+        try:
+            if self.config.backend_mode == "OPENOCD":
+                sock = connect_openocd_tcl(self.config, timeout=0.3)
+                self.active_socket = sock
+                for key, address, size in self.requests:
+                    if not self.running:
+                        break
+                    sock.sendall(f"mdb {hex(address)} {size}\x1a".encode("utf-8"))
+                    results[key] = self._openocd_bytes(receive_tcl_response(sock), size)
+            else:
+                if not self.jlink:
+                    raise RuntimeError("J-Link 链路未连接")
+                for key, address, size in self.requests:
+                    if not self.running:
+                        break
+                    with self.jlink_lock:
+                        results[key] = bytes(self.jlink.memory_read8(address, size))
+        except Exception as exc:
+            error = str(exc)
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            self.active_socket = None
+            self.finished_signal.emit(results, error)
+
+    def stop(self, wait_ms=250):
+        self.running = False
+        sock = self.active_socket
+        if sock:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+            self.active_socket = None
+        return self.wait(max(0, int(wait_ms)))
 
 
 class HighSpeedSamplingWorker(QThread):

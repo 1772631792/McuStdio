@@ -1,5 +1,6 @@
 # MCU Studio user interface
 import sys
+import csv
 import socket
 import re
 import time
@@ -12,12 +13,14 @@ import numpy as np
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QTreeWidget, QTreeWidgetItem, 
-                             QPushButton, QComboBox, QLabel, QLineEdit, 
-                             QHeaderView, QMenu, QMessageBox, QDialog, QFileDialog, 
-                             QFormLayout, QCheckBox, QSplitter, QTextEdit, QRadioButton, QButtonGroup,
-                             QTabWidget, QFrame, QTabBar)
+                             QPushButton, QComboBox as _QComboBox, QLabel, QLineEdit,
+                             QHeaderView, QMenu, QMessageBox as _QMessageBox, QDialog, QFileDialog,
+                             QFormLayout, QCheckBox as _QCheckBox, QSplitter, QTextEdit,
+                             QRadioButton, QButtonGroup, QTabWidget, QFrame, QTabBar,
+                             QStyle, QStyleOptionButton, QProgressBar)
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal, QVariantAnimation, QMutex, QMutexLocker
-from PyQt6.QtGui import QFont, QKeyEvent, QIntValidator, QDoubleValidator, QColor, QAction, QPen, QIcon
+from PyQt6.QtGui import (QFont, QKeyEvent, QIntValidator, QDoubleValidator, QColor,
+                         QAction, QPen, QIcon, QPainter, QPalette, QPainterPath)
 
 import pyqtgraph as pg
 
@@ -36,7 +39,8 @@ from .core import (
     type_label,
     validate_openocd_config,
 )
-from .workers import BackendCloseWorker, ElfFlashWorker, HighSpeedSamplingWorker
+from .workers import (BackendCloseWorker, BackendReconnectWorker, ElfFlashWorker,
+                      HighSpeedSamplingWorker, LowSpeedReadWorker, OpenOcdFlashWorker)
 
 pg.setConfigOptions(useOpenGL=False, antialias=True)
 
@@ -44,6 +48,185 @@ try:
     import pylink
 except ImportError:
     pylink = None
+
+
+class SilentMessageBox:
+    """Application-styled modal messages that never invoke a system alert sound."""
+
+    StandardButton = _QMessageBox.StandardButton
+    _BUTTONS = (
+        (_QMessageBox.StandardButton.Yes, "是"),
+        (_QMessageBox.StandardButton.No, "否"),
+        (_QMessageBox.StandardButton.Ok, "确定"),
+        (_QMessageBox.StandardButton.Cancel, "取消"),
+    )
+    _KINDS = {
+        "information": ("i", "#0a84ff"),
+        "warning": ("!", "#ff9f0a"),
+        "critical": ("×", "#ff453a"),
+        "question": ("?", "#0a84ff"),
+    }
+
+    @classmethod
+    def _show(cls, parent, title, text, kind, buttons=None, default_button=None):
+        buttons = buttons or cls.StandardButton.Ok
+        default_button = default_button or cls.StandardButton.NoButton
+        dialog = QDialog(parent)
+        dialog.setWindowTitle(title)
+        dialog.setModal(True)
+        dialog.setMinimumWidth(430)
+        dialog.setMaximumWidth(720)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(18)
+
+        content = QHBoxLayout()
+        content.setSpacing(16)
+        symbol, color = cls._KINDS[kind]
+        icon = QLabel(symbol)
+        icon.setFixedSize(34, 34)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setStyleSheet(
+            f"background: {color}; color: white; border-radius: 17px; "
+            "font-size: 20px; font-weight: 800;"
+        )
+        content.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
+        message = QLabel(str(text))
+        message.setWordWrap(True)
+        message.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        content.addWidget(message, 1)
+        layout.addLayout(content)
+
+        result = {"button": cls.StandardButton.NoButton}
+        if buttons & cls.StandardButton.No:
+            result["button"] = cls.StandardButton.No
+        elif buttons & cls.StandardButton.Cancel:
+            result["button"] = cls.StandardButton.Cancel
+        elif buttons & cls.StandardButton.Ok:
+            result["button"] = cls.StandardButton.Ok
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        for standard_button, label in cls._BUTTONS:
+            if not buttons & standard_button:
+                continue
+            button = QPushButton(label)
+            if standard_button in (cls.StandardButton.Yes, cls.StandardButton.Ok):
+                button.setObjectName("primaryButton")
+            button.clicked.connect(
+                lambda _checked=False, value=standard_button: (
+                    result.__setitem__("button", value), dialog.accept()
+                )
+            )
+            actions.addWidget(button)
+            if standard_button == default_button:
+                button.setDefault(True)
+                button.setFocus()
+        layout.addLayout(actions)
+        dialog.exec()
+        return result["button"]
+
+    @classmethod
+    def information(cls, parent, title, text, buttons=None, default_button=None):
+        return cls._show(parent, title, text, "information", buttons, default_button)
+
+    @classmethod
+    def warning(cls, parent, title, text, buttons=None, default_button=None):
+        return cls._show(parent, title, text, "warning", buttons, default_button)
+
+    @classmethod
+    def critical(cls, parent, title, text, buttons=None, default_button=None):
+        return cls._show(parent, title, text, "critical", buttons, default_button)
+
+    @classmethod
+    def question(cls, parent, title, text, buttons=None, default_button=None):
+        return cls._show(parent, title, text, "question", buttons, default_button)
+
+
+QMessageBox = SilentMessageBox
+
+
+class HighContrastComboBox(_QComboBox):
+    """Draw a crisp theme-aware chevron over the platform combo-box arrow."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._popup_open = False
+
+    def showPopup(self):
+        self._popup_open = True
+        self.update()
+        super().showPopup()
+
+    def hidePopup(self):
+        super().hidePopup()
+        self._popup_open = False
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        role = QPalette.ColorRole.Mid if not self.isEnabled() else QPalette.ColorRole.Text
+        color = self.palette().color(role)
+        if self.hasFocus() and self.isEnabled():
+            color = self.palette().color(QPalette.ColorRole.Highlight)
+        pen = QPen(color, 2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        center_x = self.width() - 12
+        center_y = self.height() // 2
+        direction = -1 if self._popup_open else 1
+        painter.drawLine(center_x - 4, center_y - 2 * direction,
+                         center_x, center_y + 2 * direction)
+        painter.drawLine(center_x, center_y + 2 * direction,
+                         center_x + 4, center_y - 2 * direction)
+
+
+QComboBox = HighContrastComboBox
+
+
+class HighContrastCheckBox(_QCheckBox):
+    """Keep the checked state visible with every platform and application theme."""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        indicator = self.style().subElementRect(
+            QStyle.SubElement.SE_CheckBoxIndicator, option, self
+        )
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        checked = self.checkState() != Qt.CheckState.Unchecked
+        fill = self.palette().color(
+            QPalette.ColorRole.Highlight if checked else QPalette.ColorRole.Base
+        )
+        border = self.palette().color(
+            QPalette.ColorRole.Highlight if checked else QPalette.ColorRole.Mid
+        )
+        if not self.isEnabled():
+            fill = self.palette().color(QPalette.ColorRole.Window)
+            border = self.palette().color(QPalette.ColorRole.Mid)
+        painter.setPen(QPen(border, 1.2))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(indicator.adjusted(1, 1, -1, -1), 3, 3)
+        if checked:
+            path = QPainterPath()
+            path.moveTo(indicator.left() + 3.5, indicator.center().y())
+            path.lineTo(indicator.left() + 6.5, indicator.bottom() - 4.0)
+            path.lineTo(indicator.right() - 3.0, indicator.top() + 4.0)
+            check_pen = QPen(QColor("#ffffff"), 2.0)
+            check_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            check_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(check_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
+
+
+QCheckBox = HighContrastCheckBox
+
 
 DARK_STYLE = """
     QWidget { background-color: #1c1c1e; color: #f2f2f7; font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; font-size: 13px; }
@@ -53,6 +236,7 @@ DARK_STYLE = """
     QLabel#appSubtitle { color: #8b949e; font-size: 12px; }
     QLabel#sectionTitle { color: #e5e5ea; font-size: 12px; font-weight: 700; padding: 8px 0 4px 8px; border-left: 3px solid #0a84ff; }
     QLabel#fieldCaption { color: #9da5b4; font-size: 12px; font-weight: 700; }
+    QLabel#fieldHint { color: #ffb340; font-size: 12px; padding-top: 2px; }
     QLabel#toolbarSeparator { color: #3c3c3c; padding: 0 2px; }
     QFrame#topBar { background-color: #242426; border: 1px solid #3a3a3c; border-radius: 11px; }
     QWidget#plotToolbar { background-color: #242426; border: 1px solid #3a3a3c; border-radius: 9px; }
@@ -118,6 +302,7 @@ LIGHT_STYLE = """
     QLabel#appSubtitle { color: #64748b; font-size: 12px; }
     QLabel#sectionTitle { color: #3a3a3c; font-size: 12px; font-weight: 700; padding: 8px 0 4px 8px; border-left: 3px solid #007aff; }
     QLabel#fieldCaption { color: #007aff; font-size: 13px; font-weight: 700; }
+    QLabel#fieldHint { color: #b45309; font-size: 12px; padding-top: 2px; }
     QLabel#toolbarSeparator { color: #cbd5e1; padding: 0 2px; }
     QFrame#topBar { background-color: #ffffff; border: 1px solid #d1d1d6; border-radius: 11px; }
     QWidget#plotToolbar { background-color: #ffffff; border: 1px solid #d1d1d6; border-radius: 9px; }
@@ -604,7 +789,15 @@ class LoginConfigDialog(QDialog):
         form.addRow(self.lbl_ocd_targ, self.h_ocd_targ)
 
         self.log_checkbox = QCheckBox("在独立窗口显示 OpenOCD 日志")
-        form.addRow("调试日志", self.log_checkbox)
+        self.lbl_openocd_reset_hint = QLabel("连接或重连 OpenOCD 可能复位 MCU")
+        self.lbl_openocd_reset_hint.setObjectName("fieldHint")
+        log_field = QWidget()
+        log_layout = QVBoxLayout(log_field)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setSpacing(2)
+        log_layout.addWidget(self.log_checkbox)
+        log_layout.addWidget(self.lbl_openocd_reset_hint)
+        form.addRow("调试日志", log_field)
 
         layout.addLayout(form)
         status_panel = QFrame()
@@ -643,6 +836,7 @@ class LoginConfigDialog(QDialog):
         self.target_combo.setEnabled(not is_jlink)
         self.btn_browse_target.setEnabled(not is_jlink)
         self.log_checkbox.setEnabled(not is_jlink)
+        self.lbl_openocd_reset_hint.setEnabled(not is_jlink)
         self.static_env_check()
 
     def apply_selected_theme(self):
@@ -834,6 +1028,7 @@ class LoginConfigDialog(QDialog):
         if saved_intf: self._set_combo_config_value(self.interface_combo, saved_intf)
         saved_targ = self.db.get_config("last_target_cfg")
         if saved_targ: self._set_combo_config_value(self.target_combo, saved_targ)
+        self.log_checkbox.setChecked(self.db.get_config("show_openocd_log", "0") == "1")
 
     def handle_connect(self):
         if hasattr(self, 'detect_timer'): self.detect_timer.stop()
@@ -852,24 +1047,7 @@ class LoginConfigDialog(QDialog):
             self.config.show_log_window = self.log_checkbox.isChecked()
 
             try:
-                details = validate_openocd_config(self.config)
-                driver_note = ""
-                if sys.platform == "win32" and self._openocd_uses_jlink(details):
-                    driver_note = (
-                        "\n\n注意：Windows 下 OpenOCD 的 J-Link 后端需要 libusb 驱动。"
-                        "如果当前使用 SEGGER 官方驱动，请取消并选择原生 J-Link 模式。"
-                    )
-                answer = QMessageBox.warning(
-                    self,
-                    "确认启动 OpenOCD",
-                    "OpenOCD 加载 target cfg 时会初始化目标芯片；是否触发复位取决于所选 cfg、"
-                    "调试器和接线。\n\n请确认当前硬件处于安全状态，并且 target cfg 与芯片完全匹配。"
-                    + driver_note,
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if answer != QMessageBox.StandardButton.Yes:
-                    return
+                validate_openocd_config(self.config)
                 stop_managed_openocd(self.config)
                 launch_openocd(self.config)
             except Exception as exc:
@@ -901,6 +1079,7 @@ class LoginConfigDialog(QDialog):
             self.db.save_config("openocd_exe", self.config.openocd_exe)
             self.db.save_config("last_interface_cfg", self.config.interface)
             self.db.save_config("last_target_cfg", self.config.target)
+            self.db.save_config("show_openocd_log", "1" if self.config.show_log_window else "0")
         else:
             self.db.save_config("jlink_dll_dir", self.config.jlink_dll_dir)
             self.db.save_config("jlink_device", self.config.jlink_device)
@@ -1004,8 +1183,11 @@ class MCUStudioWindow(QMainWindow):
         self.elf_db = ElfDatabase()
         self.symbol_cache = {}
         self.worker = None 
+        self.low_speed_worker = None
+        self.low_speed_pending = {}
         self.retired_workers = []
         self.backend_close_workers = []
+        self.reconnect_worker = None
         self.backend_suspended = False
         self.flash_sequence_active = False
         self.elf_reload_in_progress = False
@@ -1385,9 +1567,9 @@ class MCUStudioWindow(QMainWindow):
 
         self.btn_flash = QPushButton("烧录")
         self.btn_flash.setProperty("commandButton", True)
-        self.btn_flash.setToolTip("只有点击并确认后才会擦写 Flash/复位；普通调试不复位 MCU")
+        self.btn_flash.setToolTip("通过当前调试后端烧录 ELF；只有点击并确认后才会擦写 Flash/复位")
         self.btn_flash.clicked.connect(self.flash_elf_by_user)
-        self.btn_flash.setEnabled(self.config.backend_mode == "JLINK")
+        self.btn_flash.setEnabled(True)
         self.btn_disconnect.setProperty("commandButton", True)
 
         sampling_caption = QLabel("采样")
@@ -1539,6 +1721,11 @@ class MCUStudioWindow(QMainWindow):
         plot_toolbar.addSpacing(12)
         plot_toolbar.addWidget(plot_title)
         plot_toolbar.addStretch()
+        self.btn_export_csv = QPushButton("导出 CSV")
+        self.btn_export_csv.setProperty("plotTool", True)
+        self.btn_export_csv.setToolTip("选择监视变量，导出当前缓存的采样数据")
+        self.btn_export_csv.clicked.connect(self.export_variable_csv)
+        plot_toolbar.addWidget(self.btn_export_csv)
         plot_toolbar.addWidget(self.btn_freeze)
         plot_toolbar.addWidget(self.btn_canvas_adapt)
         plot_toolbar.addSpacing(10)
@@ -1569,6 +1756,21 @@ class MCUStudioWindow(QMainWindow):
         bottom_bar.addWidget(self.lbl_ch1)
         bottom_bar.addWidget(self.lbl_ch2)
         bottom_bar.addWidget(self.lbl_ch3)
+        bottom_bar.addSpacing(10)
+
+        self.flash_status_widget = QWidget()
+        flash_status_layout = QHBoxLayout(self.flash_status_widget)
+        flash_status_layout.setContentsMargins(0, 0, 0, 0)
+        flash_status_layout.setSpacing(8)
+        self.lbl_flash_progress = QLabel("FLASH READY")
+        self.lbl_flash_progress.setMinimumWidth(112)
+        self.lbl_flash_progress.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.flash_progress = QProgressBar()
+        self.flash_progress.setFixedSize(150, 14)
+        self.flash_progress.setTextVisible(False)
+        flash_status_layout.addWidget(self.lbl_flash_progress)
+        flash_status_layout.addWidget(self.flash_progress)
+        bottom_bar.addWidget(self.flash_status_widget)
         bottom_bar.addStretch()
         
         self.lbl_led = QLabel()
@@ -1587,6 +1789,7 @@ class MCUStudioWindow(QMainWindow):
         
         main_widget.setLayout(layout)
         self.setCentralWidget(main_widget)
+        self._set_flash_progress("idle")
 
     def create_new_debug_tab(self, name=None):
         if len(self.debug_trees) >= 3:
@@ -1718,6 +1921,32 @@ class MCUStudioWindow(QMainWindow):
             try: plot_widget.getViewBox().enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
             except Exception: pass
 
+    def _set_flash_progress(self, state, text="", details=""):
+        states = {
+            "idle": ("FLASH READY", "#8e8e93", 0),
+            "running": ("PROGRAMMING…", "#0a84ff", None),
+            "success": ("DOWNLOAD OK", "#34c759", 100),
+            "warning": ("FLASH OK · LINK LOST", "#ff9f0a", 100),
+            "failed": ("DOWNLOAD FAILED", "#ff453a", 100),
+        }
+        label, color, value = states[state]
+        self.lbl_flash_progress.setText(text or label)
+        self.lbl_flash_progress.setStyleSheet(
+            f"color: {color}; font-family: 'Consolas'; font-size: 12px; font-weight: 700;"
+        )
+        track = "#303033" if self.is_dark_theme else "#e5e7eb"
+        border = "#48484a" if self.is_dark_theme else "#cbd5e1"
+        self.flash_progress.setStyleSheet(
+            f"QProgressBar {{ background: {track}; border: 1px solid {border}; border-radius: 4px; }}"
+            f"QProgressBar::chunk {{ background: {color}; border-radius: 3px; }}"
+        )
+        if value is None:
+            self.flash_progress.setRange(0, 0)
+        else:
+            self.flash_progress.setRange(0, 100)
+            self.flash_progress.setValue(value)
+        self.flash_status_widget.setToolTip(details)
+
     def trigger_manual_mcu_reset(self):
         answer = QMessageBox.question(
             self, "确认复位 MCU",
@@ -1750,10 +1979,12 @@ class MCUStudioWindow(QMainWindow):
         self.force_reconnect_engine()
 
     def flash_elf_by_user(self):
-        if self.config.backend_mode != "JLINK":
-            QMessageBox.warning(self, "无法烧录", "当前不是 J-Link 模式。")
+        if self.flash_sequence_active:
             return
         elf_path = os.path.abspath(self.config.elf_path)
+        if self.config.backend_mode == "OPENOCD":
+            self._flash_elf_with_openocd(elf_path)
+            return
         jlink_dir = os.path.dirname(self.config.jlink_dll_dir) if os.path.isfile(self.config.jlink_dll_dir) else self.config.jlink_dll_dir
         commander = os.path.join(jlink_dir, "JLink.exe")
         device = self.config.jlink_device
@@ -1767,19 +1998,10 @@ class MCUStudioWindow(QMainWindow):
         if loader_error:
             QMessageBox.warning(self, "无法烧录", loader_error)
             return
-        answer = QMessageBox.warning(
-            self, "确认烧录 ELF",
-            f"芯片：{device}\nELF：{elf_path}\n\n"
-            "烧录会擦写 Flash，并在完成后复位运行 MCU。\n"
-            "普通连接、采样和重连不会执行此操作。\n\n确定继续？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes: return
-
         self.btn_flash.setEnabled(False)
-        self.btn_flash.setText("⏳ 正在烧录…")
+        self.btn_flash.setText("正在烧录…")
         self.lbl_status_text.setText("正在烧录 ELF（界面仍可响应）")
+        self._set_flash_progress("running", details=elf_path)
         self.flash_sequence_active = True
         self.backend_suspended = True
         self.stop_sampling_thread()
@@ -1792,6 +2014,34 @@ class MCUStudioWindow(QMainWindow):
             self._close_native_link_async(old_link, next_action="flash")
             return
         self._start_pending_flash()
+
+    def _flash_elf_with_openocd(self, elf_path):
+        if not os.path.isfile(elf_path):
+            QMessageBox.warning(self, "无法烧录", f"找不到 ELF：\n{elf_path}")
+            return
+        try:
+            validate_openocd_config(self.config)
+        except Exception as exc:
+            QMessageBox.warning(self, "无法烧录", str(exc))
+            return
+
+        self.btn_flash.setEnabled(False)
+        self.btn_flash.setText("正在烧录…")
+        self.lbl_status_text.setText("正在通过 OpenOCD 烧录 ELF（界面仍可响应）")
+        self._set_flash_progress("running", details=elf_path)
+        self.flash_sequence_active = True
+        self.backend_suspended = True
+        self.stop_sampling_thread()
+        if self.tcl_socket:
+            try:
+                self.tcl_socket.close()
+            except OSError:
+                pass
+        self.tcl_socket = None
+        self.openocd_link_alive = False
+        self.openocd_flash_worker = OpenOcdFlashWorker(self.config, elf_path, self)
+        self.openocd_flash_worker.finished_signal.connect(self.handle_openocd_flash_finished)
+        self.openocd_flash_worker.start()
 
     def _start_pending_flash(self):
         args = getattr(self, 'pending_flash_args', None)
@@ -1868,36 +2118,66 @@ class MCUStudioWindow(QMainWindow):
         self.flash_sequence_active = False
         self.backend_suspended = False
         self.btn_flash.setText("烧录")
-        self.btn_flash.setEnabled(self.config.backend_mode == "JLINK")
+        self.btn_flash.setEnabled(True)
         self.lbl_status_text.setText("烧录完成" if success else "烧录失败")
         if success:
             reload_ok, reload_message = self.reload_elf_symbols(show_message=False, source="flash")
             message += f"\n\n{'✓' if reload_ok else '⚠'} {reload_message}"
-            QMessageBox.information(self, "烧录完成", message)
+            self._set_flash_progress("success", details=message)
         else:
             self.restart_sampling_thread()
-            QMessageBox.critical(self, "烧录失败", message)
+            self._set_flash_progress("failed", details=message)
+
+    def handle_openocd_flash_finished(self, success, message, backend_ready):
+        worker = getattr(self, "openocd_flash_worker", None)
+        self.openocd_flash_worker = None
+        if worker:
+            worker.deleteLater()
+        self.flash_sequence_active = False
+        self.backend_suspended = not backend_ready
+        self.btn_flash.setText("烧录")
+        self.btn_flash.setEnabled(True)
+        self.btn_reconnect.setEnabled(True)
+
+        if backend_ready:
+            self.init_global_link_backend()
+            backend_ready = self.openocd_link_alive
+            self.backend_suspended = not backend_ready
+        self.btn_disconnect.setEnabled(backend_ready)
+        if backend_ready:
+            self.restart_sampling_thread()
+
+        if success:
+            reload_ok, reload_message = self.reload_elf_symbols(show_message=False, source="flash")
+            message += f"\n\n{'✓' if reload_ok else '⚠'} {reload_message}"
+            if backend_ready:
+                self.lbl_status_text.setText("OpenOCD 烧录完成，调试连接已恢复")
+                self._set_flash_progress("success", details=message)
+            else:
+                self.lbl_status_text.setText("烧录完成，OpenOCD 调试连接恢复失败")
+                self._set_flash_progress("warning", details=message)
+        else:
+            self.lbl_status_text.setText("OpenOCD 烧录失败")
+            self._set_flash_progress("failed", details=message)
 
     def force_reconnect_engine(self):
+        if self.reconnect_worker and self.reconnect_worker.isRunning():
+            return
         self._execute_flash_animation(self.btn_reconnect, "#00b0ff", "")
         self.backend_suspended = True
         self.stop_sampling_thread()
+        self.btn_disconnect.setEnabled(False)
+        self.btn_reconnect.setEnabled(False)
+        self.btn_flash.setEnabled(False)
+        self.btn_mcu_reset.setEnabled(False)
+        self.lbl_status_text.setText(f"正在后台重连 {self.config.backend_mode}…")
         if self.config.backend_mode == "OPENOCD":
             if self.tcl_socket: 
                 try: self.tcl_socket.close()
                 except: pass
             self.tcl_socket = None
             self.openocd_link_alive = False
-            try:
-                stop_managed_openocd(self.config)
-                launch_openocd(self.config)
-                self.backend_suspended = False
-                self.init_global_link_backend()
-            except Exception as exc:
-                self.backend_suspended = True
-                self.lbl_status_text.setText("OpenOCD 重连失败")
-                QMessageBox.critical(self, "OpenOCD 重连失败", str(exc))
-            self._finish_backend_reconnect()
+            self._start_backend_reconnect()
             return
 
         old_link = self.jlink_native_instance
@@ -1906,9 +2186,32 @@ class MCUStudioWindow(QMainWindow):
             self._close_native_link_async(old_link, next_action="reconnect")
             self.lbl_status_text.setText("正在后台释放旧 J-Link 后端…")
         else:
+            self._start_backend_reconnect()
+
+    def _start_backend_reconnect(self):
+        self.reconnect_worker = BackendReconnectWorker(self.config, self.jlink_lock, self)
+        self.reconnect_worker.finished_signal.connect(self._backend_reconnect_finished)
+        self.reconnect_worker.start()
+
+    def _backend_reconnect_finished(self, success, error, backend):
+        worker = self.reconnect_worker
+        self.reconnect_worker = None
+        if worker:
+            worker.deleteLater()
+        if success:
+            if self.config.backend_mode == "OPENOCD":
+                self.tcl_socket = backend
+                self.openocd_link_alive = True
+            else:
+                self.jlink_native_instance = backend
             self.backend_suspended = False
-            self.init_global_link_backend()
-            self._finish_backend_reconnect()
+        else:
+            self.backend_suspended = True
+        self.btn_flash.setEnabled(True)
+        self.btn_mcu_reset.setEnabled(True)
+        self._finish_backend_reconnect()
+        if not success:
+            QMessageBox.critical(self, f"{self.config.backend_mode} 重连失败", error)
 
     def disconnect_backend(self):
         if self.flash_sequence_active:
@@ -1949,9 +2252,7 @@ class MCUStudioWindow(QMainWindow):
             self.backend_close_workers.remove(worker)
         worker.deleteLater()
         if next_action == "reconnect":
-            self.backend_suspended = False
-            self.init_global_link_backend()
-            self._finish_backend_reconnect()
+            self._start_backend_reconnect()
         elif next_action == "flash":
             self._start_pending_flash()
         elif error:
@@ -2042,6 +2343,77 @@ class MCUStudioWindow(QMainWindow):
             t_idx = row[4] if len(row) > 4 else 0
             if '.' in path or '[' in path: self.inject_var_to_tree_ui(path, v_type, t_idx)
 
+    def export_variable_csv(self):
+        # Copy paired samples under the existing lock; dialogs and disk I/O never hold it.
+        with QMutexLocker(self.buffer_mutex):
+            snapshots = [
+                (i, path, list(zip(self.ch_time_stamps[i], self.ch_buffers[i])))
+                for i, path in enumerate(self.ch_paths) if path
+            ]
+        if not snapshots:
+            QMessageBox.information(self, "导出 CSV", "请先将变量绑定到监视通道并开始采样。")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("导出变量数据")
+        dialog.setMinimumWidth(460)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+        form = QFormLayout()
+        selector = QComboBox()
+        for channel, path, rows in snapshots:
+            selector.addItem(f"CH{channel + 1} · {path}")
+        form.addRow("选择变量", selector)
+        details = QLabel()
+        form.addRow("数据范围", details)
+        layout.addLayout(form)
+        note = QLabel("导出打开此窗口时的缓存快照，包含相对时间（ms）和变量值。\n缓存之外的历史数据不包含在内；实时采样继续运行。")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        cancel = QPushButton("取消")
+        save = QPushButton("保存 CSV…")
+        save.setObjectName("primaryButton")
+        actions.addWidget(cancel)
+        actions.addWidget(save)
+        layout.addLayout(actions)
+        cancel.clicked.connect(dialog.reject)
+        save.clicked.connect(dialog.accept)
+
+        def update_details(index):
+            rows = snapshots[index][2]
+            details.setText(
+                f"{len(rows):,} 个采样点 · {rows[0][0]:.3f}–{rows[-1][0]:.3f} ms"
+                if rows else "暂无采样数据，请采样后重新打开导出窗口"
+            )
+            save.setEnabled(bool(rows))
+
+        selector.currentIndexChanged.connect(update_details)
+        update_details(0)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        channel, variable, rows = snapshots[selector.currentIndex()]
+        safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', variable)[:100]
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "保存 CSV", f"CH{channel + 1}_{safe_name}_{time.strftime('%Y%m%d_%H%M%S')}.csv",
+            "CSV 文件 (*.csv)"
+        )
+        if not filename:
+            return
+        if not filename.lower().endswith('.csv'):
+            filename += '.csv'
+        try:
+            with open(filename, 'w', newline='', encoding='utf-8-sig') as stream:
+                writer = csv.writer(stream)
+                writer.writerow(['time_ms', variable])
+                writer.writerows(rows)
+        except (OSError, csv.Error) as exc:
+            QMessageBox.warning(self, "导出失败", f"无法保存 CSV 文件：\n{exc}")
+            return
+        QMessageBox.information(self, "导出完成", f"已导出 {len(rows):,} 个采样点。\n{filename}")
+
     def handle_high_speed_data(self, batch_data):
         locker = QMutexLocker(self.buffer_mutex)
         for timestamp, data_packet in batch_data:
@@ -2053,6 +2425,36 @@ class MCUStudioWindow(QMainWindow):
             if len(self.ch_buffers[i]) > 40000:
                 self.ch_buffers[i] = self.ch_buffers[i][-25000:]
                 self.ch_time_stamps[i] = self.ch_time_stamps[i][-25000:]
+
+    @staticmethod
+    def _display_plot_data(timestamps, values, start_idx, max_points=4000):
+        """Return peak-preserving display data with a bounded render cost."""
+        x_values = np.asarray(timestamps[start_idx:], dtype=np.float64)
+        y_values = np.asarray(values[start_idx:], dtype=np.float64)
+        count = min(x_values.size, y_values.size)
+        if count == 0:
+            return x_values[:0], y_values[:0]
+        x_values, y_values = x_values[:count], y_values[:count]
+        finite = np.isfinite(x_values) & np.isfinite(y_values)
+        if not finite.all():
+            x_values, y_values = x_values[finite], y_values[finite]
+            count = x_values.size
+        if count <= max_points:
+            return x_values, y_values
+
+        bucket_count = max(1, max_points // 2)
+        step = max(1, int(np.ceil(count / bucket_count)))
+        group_count = int(np.ceil(count / step))
+        padded_count = group_count * step
+        padded = np.pad(y_values, (0, padded_count - count), mode="edge")
+        grouped = padded.reshape(group_count, step)
+        base = np.arange(group_count, dtype=np.int64) * step
+        minimum = base + np.argmin(grouped, axis=1)
+        maximum = base + np.argmax(grouped, axis=1)
+        indices = np.column_stack((np.minimum(minimum, maximum),
+                                   np.maximum(minimum, maximum))).ravel()
+        indices = indices[indices < count]
+        return x_values[indices], y_values[indices]
 
     def update_plot_canvas(self):
         if self.is_frozen or self.layout_switching: return
@@ -2110,14 +2512,15 @@ class MCUStudioWindow(QMainWindow):
                         v_data = self.ch_buffers[target_ch]
                         start_idx = bisect.bisect_left(t_data, min_x)
                         if len(t_data) > start_idx:
-                            x_arr = np.array(t_data[start_idx:], dtype=np.float64)
-                            y_arr = np.array(v_data[start_idx:], dtype=np.float64)
+                            x_arr, y_arr = self._display_plot_data(t_data, v_data, start_idx)
                             if path not in curves_map:
                                 smooth_pen = QPen(QColor(self.ch_colors[target_ch]), 2.0)
                                 smooth_pen.setCosmetic(True)
                                 smooth_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
                                 smooth_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
                                 curves_map[path] = pw.plot(pen=smooth_pen, antialias=True)
+                                curves_map[path].setClipToView(True)
+                                curves_map[path].setDownsampling(auto=True, method="peak")
                             curves_map[path].setData(x_arr, y_arr)
             except: pass 
 
@@ -2464,6 +2867,7 @@ class MCUStudioWindow(QMainWindow):
             self.worker.start()
 
     def stop_sampling_thread(self, wait_ms=250):
+        self._stop_low_speed_worker(wait_ms)
         worker = getattr(self, 'worker', None)
         self.worker = None
         if not worker:
@@ -2478,13 +2882,32 @@ class MCUStudioWindow(QMainWindow):
             worker.deleteLater()
         return stopped
 
+    def _stop_low_speed_worker(self, wait_ms=250):
+        worker = self.low_speed_worker
+        self.low_speed_worker = None
+        self.low_speed_pending = {}
+        if not worker:
+            return True
+        try:
+            worker.finished_signal.disconnect(self._finish_low_speed_read)
+        except (TypeError, RuntimeError):
+            pass
+        stopped = worker.stop(wait_ms)
+        if stopped:
+            worker.deleteLater()
+        else:
+            self.retired_workers.append(worker)
+            worker.finished.connect(lambda w=worker: self._forget_retired_worker(w))
+        return stopped
+
     def _forget_retired_worker(self, worker):
         if worker in self.retired_workers:
             self.retired_workers.remove(worker)
         worker.deleteLater()
 
     def low_speed_tree_refresh(self):
-        if self.layout_switching or self.backend_suspended: return
+        if self.layout_switching or self.backend_suspended:
+            return
         current_tab = self.current_debug_slot()
         active_tabs = {current_tab} if current_tab is not None else set()
         active_tabs.update(
@@ -2492,99 +2915,123 @@ class MCUStudioWindow(QMainWindow):
             if window.isVisible()
         )
         db_vars_by_tab = {slot: self.db.get_var_map(slot) for slot in active_tabs}
-        read_cache = {}
         labels = [self.lbl_ch1, self.lbl_ch2, self.lbl_ch3]
-        locker = QMutexLocker(self.buffer_mutex)
-        
-        for i in range(3):
-            if self.ch_paths[i]:
-                labels[i].setText(f"CH{i+1}: {self.ch_buffers[i][-1]:.2f}" if (self.ch_buffers[i] and (self.config.backend_mode == "JLINK" or self.openocd_link_alive)) else f"CH{i+1}: 断开")
-            else: labels[i].setText(f"CH{i+1}  空闲")
-        del locker
+        with QMutexLocker(self.buffer_mutex):
+            channel_values = [values[-1] if values else None for values in self.ch_buffers]
+        connected = self.config.backend_mode == "JLINK" or self.openocd_link_alive
+        for index, path in enumerate(self.ch_paths):
+            if path:
+                value = channel_values[index]
+                labels[index].setText(
+                    f"CH{index + 1}: {value:.2f}" if value is not None and connected
+                    else f"CH{index + 1}: 断开"
+                )
+            else:
+                labels[index].setText(f"CH{index + 1}  空闲")
 
-        def refresh_item(item, t_idx):
+        if self.low_speed_worker:
+            return
+
+        pending = {}
+        requests = {}
+
+        def collect_item(item, t_idx):
             tree = self.debug_trees.get(t_idx)
-            if not tree or tree.itemWidget(item, 2) is not None: return
+            if not tree or tree.itemWidget(item, 2) is not None:
+                return
 
             path = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
             v_type = item.text(1)
             if "{结构体/数组}" in item.text(2):
                 if item.isExpanded():
-                    for idx in range(item.childCount()): refresh_item(item.child(idx), t_idx)
+                    for idx in range(item.childCount()):
+                        collect_item(item.child(idx), t_idx)
                 return
 
-            # Values outside the viewport do not need a hardware transaction.
-            # They are refreshed as soon as the user scrolls them into view.
             rect = tree.visualItemRect(item)
             if not rect.isValid() or rect.bottom() < 0 or rect.top() > tree.viewport().height():
                 return
-                
-            for i in range(3):
-                if self.ch_paths[i] == path:
-                    if self.config.backend_mode == "OPENOCD" and not self.openocd_link_alive: item.setText(2, "断开")
-                    else: item.setText(2, f"{self.ch_buffers[i][-1]:.4f}" if self.ch_buffers[i] else "载入中")
+
+            for channel_index, channel_path in enumerate(self.ch_paths):
+                if channel_path == path:
+                    value = channel_values[channel_index]
+                    item.setText(2, f"{value:.4f}" if value is not None and connected else "断开")
                     return
-            
+
             tab_vars = db_vars_by_tab.get(t_idx, {})
-            if path not in tab_vars: return
+            if path not in tab_vars:
+                return
             offset, base_var, _v_type = tab_vars[path]
-            if base_var.startswith("0x") or base_var.startswith("0X"): absolute_address = int(base_var, 16) + offset
+            if base_var.startswith(("0x", "0X")):
+                absolute_address = int(base_var, 16) + offset
             else:
                 base_addr = self.symbol_cache.get(base_var)
-                if base_addr is None: return
+                if base_addr is None:
+                    return
                 absolute_address = base_addr + offset
 
-            cache_key = (path, absolute_address, v_type.strip())
-            if cache_key in read_cache:
-                item.setText(2, read_cache[cache_key])
-                for idx in range(item.childCount()): refresh_item(item.child(idx), t_idx)
-                return
-
-            try:
-                type_info = self.type_info_for_path(path)
-                if type_info is not None and scalar_size(type_info):
-                    value = self.decode_value(self.read_memory_bytes(absolute_address, scalar_size(type_info)), type_info)
-                    display_value = f"{value:.4f}" if isinstance(value, float) else str(value)
-                    read_cache[cache_key] = display_value
-                    item.setText(2, display_value)
-                    for idx in range(item.childCount()): refresh_item(item.child(idx), t_idx)
-                    return
-                norm_type = v_type.strip()
-                is_custom_enum = False
-                width_bytes = 1 if "int8" in norm_type or "char" in norm_type else (2 if "int16" in norm_type else 4)
-                if self.config.backend_mode == "OPENOCD":
-                    if not self.openocd_link_alive: raise Exception()
-                    cmd = "mdb" if width_bytes == 1 else ("mdh" if width_bytes == 2 else "mdw")
-                    res = self.send_tcl_cmd(f"{cmd} {hex(absolute_address)}")
-                    if "ERROR" in res or ":" not in res: raise Exception()
-                    raw_int = int(res.split(":")[-1].strip(), 16)
-                else:
-                    if not self.jlink_native_instance: raise Exception()
-                    with self.jlink_lock:
-                        if width_bytes == 1: raw_int = self.jlink_native_instance.memory_read8(absolute_address, 1)[0]
-                        elif width_bytes == 2: raw_int = self.jlink_native_instance.memory_read16(absolute_address, 1)[0]
-                        else: raw_int = self.jlink_native_instance.memory_read32(absolute_address, 1)[0]
-                
-                if "uint8" in norm_type: v = raw_int & 0xFF
-                elif "int8" in norm_type or "char" in norm_type: v = struct.unpack('<b', struct.pack('<B', raw_int & 0xFF))[0]
-                elif "uint16" in norm_type: v = raw_int & 0xFFFF
-                elif "int16" in norm_type: v = struct.unpack('<h', struct.pack('<H', raw_int & 0xFFFF))[0]
-                elif "uint32" in norm_type: v = raw_int & 0xFFFFFFFF
-                elif "float" in norm_type: v = struct.unpack('<f', struct.pack('<I', raw_int & 0xFFFFFFFF))[0]
-                elif is_custom_enum: v = raw_int & 0xFF
-                else: v = struct.unpack('<i', struct.pack('<I', raw_int & 0xFFFFFFFF))[0]
-                display_value = f"{v:.4f}" if "float" in norm_type else str(v)
-                read_cache[cache_key] = display_value
-                item.setText(2, display_value)
-            except:
-                read_cache[cache_key] = "断开"
-                item.setText(2, "断开")
-            for idx in range(item.childCount()): refresh_item(item.child(idx), t_idx)
+            type_info = self.type_info_for_path(path)
+            size = scalar_size(type_info) if type_info is not None else 0
+            if not size:
+                norm_type = v_type.replace("_t", "").strip().lower()
+                size = 1 if "int8" in norm_type or "char" in norm_type else (2 if "int16" in norm_type else 4)
+            read_key = (absolute_address, size)
+            requests[read_key] = (read_key, absolute_address, size)
+            pending[(t_idx, path)] = (item, read_key, type_info, v_type)
 
         for tab_index in sorted(active_tabs):
             tree = self.debug_trees.get(tab_index)
             if tree and tree.isVisible():
-                for i in range(tree.topLevelItemCount()): refresh_item(tree.topLevelItem(i), tab_index)
+                for item_index in range(tree.topLevelItemCount()):
+                    collect_item(tree.topLevelItem(item_index), tab_index)
+
+        if not requests:
+            return
+        self.low_speed_pending = pending
+        self.low_speed_worker = LowSpeedReadWorker(
+            self.config,
+            list(requests.values()),
+            self.jlink_native_instance,
+            self.jlink_lock,
+            self,
+        )
+        self.low_speed_worker.finished_signal.connect(self._finish_low_speed_read)
+        self.low_speed_worker.start()
+
+    @staticmethod
+    def _format_low_speed_value(data, type_info, v_type):
+        if type_info is not None and scalar_size(type_info):
+            value = MCUStudioWindow.decode_value(data, type_info)
+            return f"{value:.4f}" if isinstance(value, float) else str(value)
+        norm_type = v_type.replace("_t", "").strip().lower()
+        raw = int.from_bytes(data, "little", signed=False)
+        if "float" in norm_type and len(data) == 4:
+            return f"{struct.unpack('<f', data)[0]:.4f}"
+        signed = "int" in norm_type and "uint" not in norm_type
+        value = int.from_bytes(data, "little", signed=signed)
+        return str(value if signed else raw)
+
+    def _finish_low_speed_read(self, results, error):
+        worker = self.low_speed_worker
+        self.low_speed_worker = None
+        pending = self.low_speed_pending
+        self.low_speed_pending = {}
+        if worker:
+            worker.deleteLater()
+        for (_tab_index, path), (item, read_key, type_info, v_type) in pending.items():
+            if path in self.ch_paths:
+                continue
+            try:
+                if item.treeWidget() is None:
+                    continue
+                data = results.get(read_key)
+                if data is None:
+                    if error:
+                        item.setText(2, "断开")
+                    continue
+                item.setText(2, self._format_low_speed_value(data, type_info, v_type))
+            except (RuntimeError, ValueError, struct.error, OverflowError):
+                continue
 
     def inject_var_to_tree_ui(self, path, v_type, tab_idx):
         tree = self.debug_trees.get(tab_idx)
@@ -2656,6 +3103,10 @@ class MCUStudioWindow(QMainWindow):
     def closeEvent(self, event):
         if self.flash_sequence_active:
             QMessageBox.information(self, "正在烧录", "Flash 烧录尚未完成，为避免中断导致芯片无法启动，请等待烧录结束。")
+            event.ignore()
+            return
+        if self.reconnect_worker and self.reconnect_worker.isRunning():
+            QMessageBox.information(self, "正在重连", "通信后端正在后台重连，请等待完成后再关闭程序。")
             event.ignore()
             return
         if hasattr(self, 'elf_watch_timer'): self.elf_watch_timer.stop()

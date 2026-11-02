@@ -15,9 +15,9 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QPushButton, QComboBox, QLabel, QLineEdit, 
                              QHeaderView, QMenu, QMessageBox, QDialog, QFileDialog, 
                              QFormLayout, QCheckBox, QSplitter, QTextEdit, QRadioButton, QButtonGroup,
-                             QTabWidget)
+                             QTabWidget, QFrame, QTabBar)
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal, QVariantAnimation, QMutex, QMutexLocker
-from PyQt6.QtGui import QFont, QKeyEvent, QIntValidator, QDoubleValidator, QColor, QAction, QPen
+from PyQt6.QtGui import QFont, QKeyEvent, QIntValidator, QDoubleValidator, QColor, QAction, QPen, QIcon
 
 import pyqtgraph as pg
 
@@ -46,50 +46,126 @@ except ImportError:
     pylink = None
 
 DARK_STYLE = """
-    QWidget { background-color: #1a1a1a; color: #e0e0e0; font-family: "Microsoft YaHei", "Consolas"; font-size: 12px; }
-    QDialog, QMainWindow { background-color: #121212; }
+    QWidget { background-color: #1c1c1e; color: #f2f2f7; font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; font-size: 13px; }
+    QDialog, QMainWindow { background-color: #1c1c1e; }
     QLabel { background-color: transparent; }
-    QLineEdit, QComboBox, QCheckBox, QTextEdit { background-color: #242424; border: 1px solid #3f3f46; padding: 5px; color: #ffffff; border-radius: 6px; }
-    QLineEdit:focus, QComboBox:focus, QTextEdit:focus { border: 1px solid #42a5f5; background-color: #2a2a2a; }
-    QPushButton { background-color: #2d2d2d; border: 1px solid #4b5563; padding: 5px 12px; color: #ffffff; border-radius: 6px; font-weight: 500; }
-    QPushButton:hover { background-color: #3d3d3d; border: 1px solid #60a5fa; }
-    QPushButton:pressed { background-color: #1e3a5f; }
-    QPushButton:disabled { background-color: #1f1f1f; color: #666666; border: 1px solid #2d2d2d; }
-    QLineEdit:disabled, QComboBox:disabled { background-color: #1a1a1a; color: #666666; border: 1px solid #2d2d2d; }
-    QTreeWidget { background-color: #161616; border: 1px solid #2d2d2d; border-radius: 8px; alternate-background-color: #1c1c1c; }
-    QTreeWidget::item { height: 26px; border-bottom: 1px solid #222222; }
-    QTreeWidget::item:hover { background-color: #262626; }
-    QTreeWidget::item:selected { background-color: #0d47a1; color: #ffffff; }
-    QHeaderView::section { background-color: #222222; color: #b0bec5; padding: 6px; border: 1px solid #121212; font-weight: bold; }
-    QSplitter::handle { background-color: #303030; }
-    QTreeWidget QLineEdit { background-color: #2c2c2c !important; border: 2px solid #42a5f5 !important; color: #ffffff !important; font-family: "Consolas" !important; font-size: 12px !important; font-weight: bold !important; padding: 1px 3px; }
-    QTabWidget::pane { border: 1px solid #2d2d2d; background-color: #161616; border-radius: 8px; top: -1px; }
-    QTabBar::tab { background-color: #222222; color: #a3a3a3; border: 1px solid #2d2d2d; padding: 6px 15px; border-top-left-radius: 6px; border-top-right-radius: 6px; font-weight: bold; margin-right: 2px; }
-    QTabBar::tab:selected { background-color: #161616; color: #64b5f6; border-bottom-color: #161616; border-top: 2px solid #42a5f5; }
-    QToolTip { background-color: #2d2d2d; color: #ffffff; border: 1px solid #64748b; padding: 4px; }
+    QLabel#appTitle { color: #f3f3f3; font-size: 22px; font-weight: 700; letter-spacing: 1px; }
+    QLabel#appSubtitle { color: #8b949e; font-size: 12px; }
+    QLabel#sectionTitle { color: #e5e5ea; font-size: 12px; font-weight: 700; padding: 8px 0 4px 8px; border-left: 3px solid #0a84ff; }
+    QLabel#fieldCaption { color: #9da5b4; font-size: 12px; font-weight: 700; }
+    QLabel#toolbarSeparator { color: #3c3c3c; padding: 0 2px; }
+    QFrame#topBar { background-color: #242426; border: 1px solid #3a3a3c; border-radius: 11px; }
+    QWidget#plotToolbar { background-color: #242426; border: 1px solid #3a3a3c; border-radius: 9px; }
+    QLabel#plotTitle { color: #d1d1d6; font-size: 13px; font-weight: 700; }
+    QFrame#heroPanel { background-color: #1f1f1f; border: 1px solid #2d2d30; border-radius: 6px; }
+    QFrame#statusPanel { background-color: #242426; border: 1px solid #3a3a3c; border-radius: 10px; }
+    QLineEdit, QComboBox, QTextEdit { min-height: 30px; background-color: #2c2c2e; border: 1px solid #48484a; padding: 4px 10px; color: #f2f2f7; border-radius: 8px; selection-background-color: #0a84ff; font-size: 13px; }
+    QLineEdit:focus, QComboBox:focus, QTextEdit:focus { border: 1px solid #0a84ff; background-color: #323234; }
+    QComboBox::drop-down { border: 0; width: 24px; }
+    QComboBox QAbstractItemView { background-color: #2c2c2e; color: #f2f2f7; border: 1px solid #48484a; selection-background-color: #0a84ff; outline: 0; }
+    QCheckBox, QRadioButton { spacing: 7px; color: #d4d4d4; font-size: 13px; }
+    QRadioButton:checked { color: #64b5ff; font-weight: 700; }
+    QCheckBox::indicator, QRadioButton::indicator { width: 15px; height: 15px; }
+    QRadioButton::indicator { border: 1px solid #8e8e93; border-radius: 8px; background-color: #1c1c1e; }
+    QRadioButton::indicator:checked { border: 4px solid #0a84ff; background-color: #f2f2f7; }
+    QPushButton { min-height: 30px; background-color: #2c2c2e; border: 1px solid #48484a; padding: 4px 14px; color: #f2f2f7; border-radius: 8px; font-size: 13px; font-weight: 600; }
+    QPushButton:hover { background-color: #3a3a3c; border-color: #636366; }
+    QPushButton:pressed { background-color: #48484a; border-color: #0a84ff; }
+    QPushButton:disabled { background-color: #1d1d1d; color: #626262; border-color: #2a2a2a; }
+    QPushButton#primaryButton { background-color: #0e639c; border-color: #0e639c; color: #ffffff; font-weight: 700; }
+    QPushButton#primaryButton:hover { background-color: #1177bb; }
+    QPushButton#warningButton { background-color: #ff9f0a; border-color: #ff9f0a; color: #1c1c1e; }
+    QPushButton#warningButton:hover { background-color: #ffb340; }
+    QPushButton#dangerButton { background-color: #ff453a; border-color: #ff453a; color: #ffffff; }
+    QPushButton#dangerButton:hover { background-color: #ff6961; border-color: #ff6961; }
+    QFrame#actionStrip { background-color: transparent; border: 0; }
+    QPushButton[commandButton="true"] { background-color: #2c2c2e; color: #d1d1d6; border-color: #48484a; }
+    QPushButton[commandButton="true"]:hover { background-color: #3a3a3c; color: #ffffff; border-color: #636366; }
+    QPushButton[commandRole="reset"]:hover { color: #ff6961; border-color: #ff6961; }
+    QPushButton[plotTool="true"] { min-height: 28px; padding: 3px 14px; background-color: #242426; color: #d1d1d6; border-color: #3a3a3c; }
+    QPushButton[plotTool="true"]:hover { background-color: #323234; color: #ffffff; border-color: #545458; }
+    QPushButton[plotTool="true"]:checked { background-color: #094771; color: #ffffff; border-color: #007acc; }
+    QPushButton[viewSegment="first"] { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+    QPushButton[viewSegment="middle"] { border-radius: 0; border-left: 0; }
+    QPushButton[viewSegment="last"] { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 0; }
+    QPushButton[segmentPosition="first"] { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+    QPushButton[segmentPosition="middle"] { border-radius: 0; border-left: 0; }
+    QPushButton[segmentPosition="last"] { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 0; }
+    QLineEdit:disabled, QComboBox:disabled { background-color: #1b1b1b; color: #666666; border-color: #292929; }
+    QTreeWidget { background-color: #1c1c1e; border: 1px solid #3a3a3c; border-radius: 10px; alternate-background-color: #202022; outline: 0; }
+    QTreeWidget::item { height: 30px; border-bottom: 1px solid #242424; }
+    QTreeWidget::item:hover { background-color: #2c2c2e; }
+    QTreeWidget::item:selected { background-color: #094771; color: #ffffff; }
+    QHeaderView::section { background-color: #242426; color: #d1d1d6; padding: 8px; border: 0; border-right: 1px solid #3a3a3c; border-bottom: 1px solid #3a3a3c; font-size: 13px; font-weight: 700; }
+    QSplitter::handle { background-color: #2d2d30; }
+    QTreeWidget QLineEdit { background-color: #252526 !important; border: 1px solid #007acc !important; color: #ffffff !important; font-family: "Consolas" !important; font-size: 12px !important; font-weight: bold !important; padding: 1px 4px; }
+    QTabWidget::pane { border: 1px solid #3a3a3c; background-color: #1c1c1e; border-radius: 10px; top: -1px; }
+    QTabBar::tab { background-color: #2c2c2e; color: #aeaeb2; border: 1px solid #3a3a3c; padding: 7px 16px; border-radius: 8px; font-weight: 600; margin: 2px; }
+    QTabBar::tab:hover { background-color: #3a3a3c; color: #f2f2f7; }
+    QTabBar::tab:selected { background-color: #3a3a3c; color: #64b5ff; border-color: #545458; }
+    QScrollBar:vertical { background: #181818; width: 12px; margin: 0; }
+    QScrollBar::handle:vertical { background: #424242; min-height: 28px; border-radius: 5px; margin: 2px; }
+    QScrollBar::handle:vertical:hover { background: #5a5a5a; }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+    QToolTip { background-color: #252526; color: #f0f0f0; border: 1px solid #5a5a5a; padding: 5px; }
 """
 
 LIGHT_STYLE = """
-    QWidget { background-color: #f7f9fc; color: #1f2937; font-family: "Microsoft YaHei", "Consolas"; font-size: 12px; }
-    QDialog, QMainWindow { background-color: #ffffff; }
+    QWidget { background-color: #f2f2f7; color: #1c1c1e; font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; font-size: 13px; }
+    QDialog, QMainWindow { background-color: #f2f2f7; }
     QLabel { background-color: transparent; }
-    QLineEdit, QComboBox, QCheckBox, QTextEdit { background-color: #ffffff; border: 1px solid #cbd5e1; padding: 5px; color: #111827; border-radius: 6px; }
+    QLabel#appTitle { color: #172033; font-size: 22px; font-weight: 700; letter-spacing: 1px; }
+    QLabel#appSubtitle { color: #64748b; font-size: 12px; }
+    QLabel#sectionTitle { color: #3a3a3c; font-size: 12px; font-weight: 700; padding: 8px 0 4px 8px; border-left: 3px solid #007aff; }
+    QLabel#fieldCaption { color: #007aff; font-size: 13px; font-weight: 700; }
+    QLabel#toolbarSeparator { color: #cbd5e1; padding: 0 2px; }
+    QFrame#topBar { background-color: #ffffff; border: 1px solid #d1d1d6; border-radius: 11px; }
+    QWidget#plotToolbar { background-color: #ffffff; border: 1px solid #d1d1d6; border-radius: 9px; }
+    QLabel#plotTitle { color: #3a3a3c; font-size: 13px; font-weight: 700; }
+    QFrame#heroPanel { background-color: #f8fafc; border: 1px solid #dbe3ec; border-radius: 6px; }
+    QFrame#statusPanel { background-color: #ffffff; border: 1px solid #d1d1d6; border-radius: 10px; }
+    QLineEdit, QComboBox, QTextEdit { min-height: 30px; background-color: #ffffff; border: 1px solid #c7c7cc; padding: 4px 10px; color: #1c1c1e; border-radius: 8px; font-size: 13px; }
     QLineEdit:focus, QComboBox:focus, QTextEdit:focus { border: 1px solid #1976d2; background-color: #ffffff; }
-    QPushButton { background-color: #ffffff; border: 1px solid #cbd5e1; padding: 5px 12px; color: #1f2937; border-radius: 6px; font-weight: 500; }
+    QComboBox::drop-down { border: 0; width: 26px; }
+    QComboBox QAbstractItemView { background-color: #ffffff; color: #102a43; border: 1px solid #bdcad8; selection-background-color: #d9effc; selection-color: #075985; outline: 0; }
+    QCheckBox, QRadioButton { spacing: 7px; color: #19324d; font-size: 13px; }
+    QRadioButton:checked { color: #087fbd; font-weight: 700; }
+    QCheckBox::indicator, QRadioButton::indicator { width: 15px; height: 15px; }
+    QRadioButton::indicator { border: 1px solid #7d8ea3; border-radius: 8px; background-color: #ffffff; }
+    QRadioButton::indicator:checked { border: 4px solid #0b86c9; background-color: #ffffff; }
+    QPushButton { min-height: 30px; background-color: #ffffff; border: 1px solid #c7c7cc; padding: 4px 14px; color: #1c1c1e; border-radius: 8px; font-size: 13px; font-weight: 600; }
     QPushButton:hover { background-color: #eef6ff; border: 1px solid #60a5fa; }
     QPushButton:pressed { background-color: #dbeafe; }
     QPushButton:disabled { background-color: #f1f5f9; color: #94a3b8; border: 1px solid #e2e8f0; }
+    QPushButton#primaryButton { background-color: #007aff; border-color: #007aff; color: #ffffff; font-weight: 700; }
+    QPushButton#primaryButton:hover { background-color: #2188ff; }
+    QPushButton#warningButton { background-color: #ff9500; border-color: #ff9500; color: #ffffff; }
+    QPushButton#dangerButton { background-color: #ff3b30; border-color: #ff3b30; color: #ffffff; }
+    QFrame#actionStrip { background-color: transparent; border: 0; }
+    QPushButton[commandButton="true"] { background-color: #ffffff; color: #3a3a3c; border-color: #c7c7cc; }
+    QPushButton[commandButton="true"]:hover { background-color: #f2f2f7; color: #1c1c1e; border-color: #8e8e93; }
+    QPushButton[commandRole="reset"]:hover { color: #ff3b30; border-color: #ff3b30; }
+    QPushButton[plotTool="true"] { min-height: 28px; padding: 3px 14px; background-color: #ffffff; color: #3a3a3c; border-color: #d1d1d6; }
+    QPushButton[plotTool="true"]:hover { background-color: #f2f2f7; color: #1c1c1e; border-color: #8e8e93; }
+    QPushButton[plotTool="true"]:checked { background-color: #007aff; color: #ffffff; border-color: #007aff; }
+    QPushButton[viewSegment="first"] { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+    QPushButton[viewSegment="middle"] { border-radius: 0; border-left: 0; }
+    QPushButton[viewSegment="last"] { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 0; }
+    QPushButton[segmentPosition="first"] { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+    QPushButton[segmentPosition="middle"] { border-radius: 0; border-left: 0; }
+    QPushButton[segmentPosition="last"] { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 0; }
     QLineEdit:disabled, QComboBox:disabled { background-color: #f1f5f9; color: #94a3b8; border: 1px solid #e2e8f0; }
-    QTreeWidget { background-color: #ffffff; border: 1px solid #dbe3ec; border-radius: 8px; alternate-background-color: #f8fafc; }
-    QTreeWidget::item { height: 26px; border-bottom: 1px solid #edf2f7; }
+    QTreeWidget { background-color: #ffffff; border: 1px solid #d1d1d6; border-radius: 10px; alternate-background-color: #f8f8fa; }
+    QTreeWidget::item { height: 30px; border-bottom: 1px solid #e7edf4; }
     QTreeWidget::item:hover { background-color: #eff6ff; }
     QTreeWidget::item:selected { background-color: #dbeafe; color: #0f3f73; }
-    QHeaderView::section { background-color: #eef2f7; color: #475569; padding: 6px; border: 1px solid #dbe3ec; font-weight: bold; }
+    QHeaderView::section { background-color: #eaf0f6; color: #36516d; padding: 8px; border: 1px solid #d2dde8; font-size: 13px; font-weight: 700; }
     QSplitter::handle { background-color: #dbe3ec; }
     QTreeWidget QLineEdit { background-color: #ffffff !important; border: 2px solid #1976d2 !important; color: #111827 !important; font-family: "Consolas" !important; font-size: 12px !important; font-weight: bold !important; padding: 1px 3px; }
-    QTabWidget::pane { border: 1px solid #dbe3ec; background-color: #ffffff; border-radius: 8px; top: -1px; }
-    QTabBar::tab { background-color: #eef2f7; color: #64748b; border: 1px solid #dbe3ec; padding: 6px 15px; border-top-left-radius: 6px; border-top-right-radius: 6px; font-weight: bold; margin-right: 2px; }
-    QTabBar::tab:selected { background-color: #ffffff; color: #1565c0; border-bottom-color: #ffffff; border-top: 2px solid #1976d2; }
+    QTabWidget::pane { border: 1px solid #d1d1d6; background-color: #ffffff; border-radius: 10px; top: -1px; }
+    QTabBar::tab { background-color: #e5e5ea; color: #636366; border: 1px solid #d1d1d6; padding: 7px 16px; border-radius: 8px; font-weight: 600; margin: 2px; }
+    QTabBar::tab:hover { background-color: #dcdce1; color: #1c1c1e; }
+    QTabBar::tab:selected { background-color: #ffffff; color: #007aff; border-color: #b8b8bd; }
     QToolTip { background-color: #ffffff; color: #111827; border: 1px solid #94a3b8; padding: 4px; }
 """
 
@@ -101,15 +177,59 @@ POPUP_MENU_STYLE = """
 """
 
 DARK_POPUP_MENU_STYLE = """
-    QMenu { background-color: #222222; color: #ffffff; border: 1px solid #4b5563; padding: 6px; font-family: "Microsoft YaHei", "Consolas"; font-size: 13px; font-weight: bold; }
-    QMenu::item { padding: 6px 28px 6px 16px; border-radius: 4px; background-color: transparent; color: #ffffff; }
-    QMenu::item:selected { background-color: #0d47a1; color: #ffffff; }
-    QMenu::separator { height: 1px; background-color: #4b5563; margin: 4px 0px; }
+    QMenu { background-color: #252526; color: #d4d4d4; border: 1px solid #454545; padding: 5px; font-family: "Microsoft YaHei UI", "Microsoft YaHei"; font-size: 12px; }
+    QMenu::item { padding: 6px 28px 6px 14px; border-radius: 2px; background-color: transparent; }
+    QMenu::item:selected { background-color: #094771; color: #ffffff; }
+    QMenu::separator { height: 1px; background-color: #454545; margin: 4px 0px; }
 """
 
 
 def application_theme_stylesheet(theme_mode):
     return LIGHT_STYLE if str(theme_mode).upper() == "LIGHT" else DARK_STYLE
+
+
+class DetachableTabBar(QTabBar):
+    """Tab bar that detaches a page when its tab is dragged outside the bar."""
+
+    detach_requested = pyqtSignal(int, object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pressed_index = -1
+        self._press_global_pos = None
+        self._dragging_out = False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._pressed_index = self.tabAt(event.position().toPoint())
+            self._press_global_pos = event.globalPosition().toPoint()
+            self._dragging_out = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._pressed_index >= 0 and self._press_global_pos is not None:
+            distance = (event.globalPosition().toPoint() - self._press_global_pos).manhattanLength()
+            if distance >= QApplication.startDragDistance():
+                self._dragging_out = True
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        detach_index = self._pressed_index
+        should_detach = (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._dragging_out
+            and detach_index >= 0
+            and not self.rect().contains(event.position().toPoint())
+        )
+        global_pos = event.globalPosition().toPoint()
+        self._pressed_index = -1
+        self._press_global_pos = None
+        self._dragging_out = False
+        if should_detach:
+            self.detach_requested.emit(detach_index, global_pos)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class FloatingDebugWindow(QDialog):
@@ -165,7 +285,7 @@ class ElfVariableDialog(QDialog):
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_add_menu)
         buttons = QHBoxLayout()
-        reload_button = QPushButton("🔄 重新提取当前 ELF")
+        reload_button = QPushButton("重新提取当前 ELF")
         reload_button.setToolTip("重新读取当前 ELF 的符号表和 DWARF，并刷新已有监视变量的地址与结构")
         reload_button.clicked.connect(lambda: self.reload_requested_signal.emit())
         buttons.addWidget(reload_button); buttons.addStretch()
@@ -386,8 +506,8 @@ class LoginConfigDialog(QDialog):
         self.db = db
         self.config = ProjectConfig()
         self.is_connected = False
-        self.setWindowTitle("MCU Studio - 启动配置工作站")
-        self.resize(700, 590)
+        self.setWindowTitle("MCU Live Watch Studio")
+        self.resize(780, 620)
         self.init_ui()
         self.load_saved_config()
         self.toggle_engine_fields()
@@ -398,44 +518,56 @@ class LoginConfigDialog(QDialog):
 
     def init_ui(self):
         layout = QVBoxLayout()
+        layout.setContentsMargins(24, 20, 24, 22)
+        layout.setSpacing(10)
+
         form = QFormLayout()
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(9)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        appearance_section = QLabel("外观与固件")
+        appearance_section.setObjectName("sectionTitle")
+        form.addRow(appearance_section)
 
         self.theme_combo = QComboBox()
-        self.theme_combo.addItems(["🌙 夜间模式（默认）", "☀️ 白天模式"])
+        self.theme_combo.addItems(["深色模式（默认）", "浅色模式"])
         self.theme_combo.currentIndexChanged.connect(self.apply_selected_theme)
-        form.addRow("🎨 界面主题:", self.theme_combo)
+        form.addRow("界面主题", self.theme_combo)
         
         self.elf_edit = QLineEdit()
-        btn_elf = QPushButton("...")
+        btn_elf = QPushButton("浏览…")
         btn_elf.clicked.connect(lambda: self.select_file(self.elf_edit, "选择 ELF 固件", "ELF Files (*.elf)"))
         h1 = QHBoxLayout(); h1.addWidget(self.elf_edit); h1.addWidget(btn_elf)
-        form.addRow("🔄 固件编译文件 (.elf):", h1)
+        form.addRow("ELF 固件", h1)
 
-        form.addRow(QLabel("<hr/><b>🛠️ 调试器驱动内核主选择：</b>"))
+        backend_section = QLabel("调试后端")
+        backend_section.setObjectName("sectionTitle")
+        form.addRow(backend_section)
 
         self.driver_mode_combo = QComboBox()
-        self.driver_mode_combo.addItems(["J-Link 原生内核驱动 (无需OpenOCD/无需cfg)", "CMSIS-DAP / ST-Link (基于 OpenOCD)"])
+        self.driver_mode_combo.addItems(["J-Link 原生驱动", "ST-Link / CMSIS-DAP（OpenOCD）"])
         self.driver_mode_combo.currentIndexChanged.connect(self.toggle_engine_fields)
-        form.addRow("🔌 调试驱动架构派系:", self.driver_mode_combo)
+        form.addRow("后端类型", self.driver_mode_combo)
 
-        self.lbl_jl_dir = QLabel("📂 J-Link 驱动安装根路径:")
+        self.lbl_jl_dir = QLabel("J-Link 安装目录")
         self.jlink_dir_edit = QLineEdit()
-        self.btn_jl_dir = QPushButton("...")
+        self.btn_jl_dir = QPushButton("浏览…")
         self.btn_jl_dir.clicked.connect(self.select_jlink_dir)
         self.h_jl_dir = QHBoxLayout(); self.h_jl_dir.addWidget(self.jlink_dir_edit); self.h_jl_dir.addWidget(self.btn_jl_dir)
 
-        self.lbl_jl_dev = QLabel("🎯 芯片特定型号 (Device):")
+        self.lbl_jl_dev = QLabel("目标器件")
         self.jlink_device_edit = QLineEdit("Cortex-M0+")
         self.jlink_device_edit.textEdited.connect(lambda text: self.jlink_device_edit.setProperty("connect_device", text.strip()))
         self.btn_jl_device = QPushButton("选择芯片…")
         self.btn_jl_device.clicked.connect(self.open_jlink_device_selector)
         self.h_jl_device = QHBoxLayout(); self.h_jl_device.addWidget(self.jlink_device_edit); self.h_jl_device.addWidget(self.btn_jl_device)
 
-        self.lbl_jl_svd = QLabel("📋 SVD（可选，仅用于外设寄存器名称）:")
+        self.lbl_jl_svd = QLabel("SVD（可选）")
         self.svd_edit = QLineEdit()
         self.svd_edit.setPlaceholderText("可留空：不影响 ELF 烧录、DWARF 变量或波形调试")
         self.svd_edit.setToolTip("SVD 只描述外设寄存器名称/位域；J-Link Flash 算法来自所选 DLL/XML，与 SVD 无关。")
-        self.btn_svd = QPushButton("...")
+        self.btn_svd = QPushButton("浏览…")
         self.btn_svd.clicked.connect(lambda: self.select_file(self.svd_edit, "选择外设 SVD 描述文件", "SVD Files (*.svd *.txt)"))
         self.btn_clear_svd = QPushButton("清空")
         self.btn_clear_svd.setToolTip("清除上一颗芯片遗留的 SVD；不影响烧录和调试")
@@ -446,24 +578,24 @@ class LoginConfigDialog(QDialog):
         form.addRow(self.lbl_jl_dev, self.h_jl_device)
         form.addRow(self.lbl_jl_svd, self.h_jl_svd)
 
-        self.lbl_ocd_exe = QLabel("🚀 OpenOCD 路径 (openocd.exe):")
+        self.lbl_ocd_exe = QLabel("OpenOCD 程序")
         self.openocd_edit = QLineEdit()
         self.openocd_edit.editingFinished.connect(self.refresh_openocd_cfgs)
-        self.btn_ocd = QPushButton("...")
+        self.btn_ocd = QPushButton("浏览…")
         self.btn_ocd.clicked.connect(self.select_openocd_executable)
         self.h_ocd_exe = QHBoxLayout(); self.h_ocd_exe.addWidget(self.openocd_edit); self.h_ocd_exe.addWidget(self.btn_ocd)
 
-        self.lbl_ocd_intf = QLabel("🔌 硬件调试器种类 (.cfg):")
+        self.lbl_ocd_intf = QLabel("探针配置")
         self.interface_combo = QComboBox()
         self.interface_combo.setEditable(True)
-        self.btn_browse_intf = QPushButton("...")
+        self.btn_browse_intf = QPushButton("浏览…")
         self.btn_browse_intf.clicked.connect(lambda: self.select_cfg_file(self.interface_combo, "interface"))
         self.h_ocd_intf = QHBoxLayout(); self.h_ocd_intf.addWidget(self.interface_combo); self.h_ocd_intf.addWidget(self.btn_browse_intf)
 
-        self.lbl_ocd_targ = QLabel("🎯 目标芯片内核型号 (.cfg):")
+        self.lbl_ocd_targ = QLabel("目标配置")
         self.target_combo = QComboBox()
         self.target_combo.setEditable(True)
-        self.btn_browse_target = QPushButton("...")
+        self.btn_browse_target = QPushButton("浏览…")
         self.btn_browse_target.clicked.connect(lambda: self.select_cfg_file(self.target_combo, "target"))
         self.h_ocd_targ = QHBoxLayout(); self.h_ocd_targ.addWidget(self.target_combo); self.h_ocd_targ.addWidget(self.btn_browse_target)
 
@@ -471,21 +603,25 @@ class LoginConfigDialog(QDialog):
         form.addRow(self.lbl_ocd_intf, self.h_ocd_intf)
         form.addRow(self.lbl_ocd_targ, self.h_ocd_targ)
 
-        self.log_checkbox = QCheckBox("显示硬件调试日志 to 独立黑框 (仅限OpenOCD)")
-        form.addRow("📋 调试黑框开关:", self.log_checkbox)
+        self.log_checkbox = QCheckBox("在独立窗口显示 OpenOCD 日志")
+        form.addRow("调试日志", self.log_checkbox)
 
         layout.addLayout(form)
-        layout.addSpacing(10)
-        
-        self.lbl_hardware_status = QLabel("🔍 准备就绪。")
-        self.lbl_hardware_status.setStyleSheet("color: #b45309; font-weight: bold; padding: 5px;")
-        layout.addWidget(self.lbl_hardware_status)
+        status_panel = QFrame()
+        status_panel.setObjectName("statusPanel")
+        status_layout = QHBoxLayout(status_panel)
+        status_layout.setContentsMargins(12, 8, 12, 8)
+        self.lbl_hardware_status = QLabel("正在检查本机调试环境…")
+        self.lbl_hardware_status.setStyleSheet("color: #cca700; font-weight: 600;")
+        status_layout.addWidget(self.lbl_hardware_status)
+        layout.addWidget(status_panel)
         
         btns = QHBoxLayout()
-        self.btn_connect = QPushButton("⚡ 初始化硬件并进入工作站")
-        self.btn_connect.setStyleSheet("background-color: #1e88e5; font-weight: bold; padding: 10px 24px; color: white; font-size: 13px;")
+        self.btn_connect = QPushButton("连接并进入工作站")
+        self.btn_connect.setObjectName("primaryButton")
+        self.btn_connect.setMinimumHeight(48)
+        self.btn_connect.setStyleSheet("font-size: 15px; font-weight: 700;")
         self.btn_connect.clicked.connect(self.handle_connect)
-        btns.addStretch()
         btns.addWidget(self.btn_connect)
         layout.addLayout(btns)
         self.setLayout(layout)
@@ -526,29 +662,29 @@ class LoginConfigDialog(QDialog):
         warning_color = "#ffd166" if is_dark else "#b45309"
         if is_jlink_mode:
             if pylink is None:
-                self.lbl_hardware_status.setText("❌ 未检测到 pylink 库，请执行 pip install pylink-square")
+                self.lbl_hardware_status.setText("未检测到 pylink 库，请执行 pip install pylink-square")
                 self.lbl_hardware_status.setStyleSheet(f"color: {error_color}; font-weight: bold;")
             else:
                 try:
                     jlink_dll_path(self.jlink_dir_edit.text().strip())
-                    self.lbl_hardware_status.setText("🟢 J-Link 原生运行环境与 DLL 位数匹配。")
+                    self.lbl_hardware_status.setText("J-Link 原生运行环境与 DLL 位数匹配")
                     self.lbl_hardware_status.setStyleSheet(f"color: {success_color}; font-weight: bold;")
                 except Exception as exc:
-                    self.lbl_hardware_status.setText(f"❌ {exc}")
+                    self.lbl_hardware_status.setText(str(exc))
                     self.lbl_hardware_status.setStyleSheet(f"color: {error_color}; font-weight: bold;")
         else:
             try:
                 details = validate_openocd_config(self._openocd_form_config())
                 if sys.platform == "win32" and self._openocd_uses_jlink(details):
                     self.lbl_hardware_status.setText(
-                        "⚠️ OpenOCD 的 J-Link 后端需要 libusb 驱动；SEGGER 官方驱动请使用上方原生 J-Link 模式。"
+                        "OpenOCD 的 J-Link 后端需要 libusb 驱动；SEGGER 官方驱动请使用原生 J-Link 模式。"
                     )
                     self.lbl_hardware_status.setStyleSheet(f"color: {warning_color}; font-weight: bold;")
                 else:
-                    self.lbl_hardware_status.setText("🟢 OpenOCD、interface 和 target 配置均有效。")
+                    self.lbl_hardware_status.setText("OpenOCD、interface 和 target 配置均有效")
                     self.lbl_hardware_status.setStyleSheet(f"color: {success_color}; font-weight: bold;")
             except Exception as exc:
-                self.lbl_hardware_status.setText(f"❌ {exc}")
+                self.lbl_hardware_status.setText(str(exc))
                 self.lbl_hardware_status.setStyleSheet(f"color: {error_color}; font-weight: bold;")
 
     def _openocd_form_config(self):
@@ -738,7 +874,7 @@ class LoginConfigDialog(QDialog):
                 launch_openocd(self.config)
             except Exception as exc:
                 message = self._friendly_openocd_error(exc)
-                self.lbl_hardware_status.setText(f"❌ OpenOCD 启动失败：{message}")
+                self.lbl_hardware_status.setText(f"OpenOCD 启动失败：{message}")
                 QMessageBox.critical(self, "OpenOCD 启动失败", message)
                 return
         else: 
@@ -754,7 +890,7 @@ class LoginConfigDialog(QDialog):
                 if not self.config.jlink_device or not self.config.jlink_connect_device:
                     raise ValueError("J-Link 芯片型号不能为空")
             except Exception as exc:
-                self.lbl_hardware_status.setText(f"❌ J-Link 配置无效：{exc}")
+                self.lbl_hardware_status.setText(f"J-Link 配置无效：{exc}")
                 QMessageBox.critical(self, "J-Link 配置无效", str(exc))
                 return
 
@@ -822,7 +958,7 @@ class AdvanceCParserDialog(QDialog):
         btns = QHBoxLayout()
         btn_cancel = QPushButton("取消")
         btn_cancel.clicked.connect(self.reject)
-        btn_run = QPushButton("🔍 智能树化解析并同步至全局主表")
+        btn_run = QPushButton("解析并同步至全局变量表")
         btn_run.setStyleSheet("background-color: #1976d2; color: white; font-weight: bold; padding: 6px 16px;")
         btn_run.clicked.connect(self.do_parse)
         
@@ -847,12 +983,12 @@ class MCUStudioWindow(QMainWindow):
         self.db = db
         self.is_dark_theme = getattr(config, 'theme_mode', 'DARK').upper() == 'DARK'
         self.theme_colors = ({
-            'plot_bg': '#111111', 'axis': '#b0bec5', 'axis_text': '#e0e0e0',
-            'crosshair': '#90a4ae', 'hover_pen': '#ffffff', 'hover_text': '#ffffff',
-            'hover_fill': '#263238', 'splitter': '#303030', 'panel': '#161616',
-            'panel_border': '#303030', 'neutral_button': '#2d2d2d',
-            'neutral_text': '#ffffff', 'status_ok': '#69db7c',
-            'channels': ['#00E676', '#FFD600', '#00E5FF'],
+            'plot_bg': '#111315', 'axis': '#4f5660', 'axis_text': '#aab2bd',
+            'crosshair': '#7f8790', 'hover_pen': '#f0f0f0', 'hover_text': '#ffffff',
+            'hover_fill': '#252526', 'splitter': '#2d2d30', 'panel': '#1f1f1f',
+            'panel_border': '#333337', 'neutral_button': '#2a2d2e',
+            'neutral_text': '#e5e5e5', 'status_ok': '#4ec96b',
+            'channels': ['#36c96b', '#f0a020', '#36b7d9'],
         } if self.is_dark_theme else {
             'plot_bg': '#ffffff', 'axis': '#64748b', 'axis_text': '#374151',
             'crosshair': '#64748b', 'hover_pen': '#1f2937', 'hover_text': '#111827',
@@ -893,7 +1029,6 @@ class MCUStudioWindow(QMainWindow):
         self.start_time = time.time()          
         self.max_display_duration_ms = 5000    
         self.is_frozen = False
-        self.canvas_adapt_start_ms = None
         self.canvas_fixed_ranges = [None, None, None]
         self.tcl_socket = None
         self.heartbeat_state = False
@@ -1200,76 +1335,89 @@ class MCUStudioWindow(QMainWindow):
     def init_ui(self):
         main_widget = QWidget()
         layout = QVBoxLayout()
-        layout.setContentsMargins(10, 8, 10, 6) 
-        
-        top = QHBoxLayout()
+        layout.setContentsMargins(10, 8, 10, 6)
+        layout.setSpacing(7)
+
+        top_bar = QFrame()
+        top_bar.setObjectName("topBar")
+        self.top_bar = top_bar
+        top = QHBoxLayout(top_bar)
+        top.setContentsMargins(10, 7, 10, 7)
+        top.setSpacing(6)
         self.wave_hz_combo = QComboBox()
         self.wave_hz_combo.addItems([
-            "Custom (自定义频率)", "500 Hz 均衡流", "1000 Hz 高速流", 
-            "2000 Hz 极限级🚀", "4000 Hz 超极限⚡", "8000 Hz 毁灭级🔥"
+            "自定义", "500 Hz", "1 kHz", "2 kHz", "4 kHz", "8 kHz"
         ])
+        self.wave_hz_combo.setMinimumWidth(105)
         self.wave_hz_combo.currentIndexChanged.connect(self.restart_sampling_thread)
         
         self.custom_hz_edit = QLineEdit("30")
-        self.custom_hz_edit.setFixedWidth(55)
+        self.custom_hz_edit.setFixedWidth(62)
         self.custom_hz_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.custom_hz_edit.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        self.custom_hz_edit.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
         self.custom_hz_edit.setValidator(QIntValidator(1, 8000, self))
         self.custom_hz_edit.editingFinished.connect(self.restart_sampling_thread)
         
-        self.btn_freeze = QPushButton("❄️ 锁定滚动")
+        self.btn_freeze = QPushButton("锁定")
+        self.btn_freeze.setProperty("plotTool", True)
+        self.btn_freeze.setCheckable(True)
         self.btn_freeze.setToolTip("锁定/恢复波形时间轴滚动（空格键）")
         self.btn_freeze.clicked.connect(self.toggle_freeze)
 
-        self.btn_canvas_adapt = QPushButton("🎯 自适应画布")
-        self.btn_canvas_adapt.setToolTip("采集 2 秒数据，按最大/最小值将 X、Y 显示跨度扩展为 2 倍")
+        self.btn_canvas_adapt = QPushButton("适配")
+        self.btn_canvas_adapt.setProperty("plotTool", True)
+        self.btn_canvas_adapt.setToolTip("立即按当前时间窗内的数据适配纵轴范围")
         self.btn_canvas_adapt.clicked.connect(self.start_canvas_auto_adapt)
-        self.canvas_adapt_timer = QTimer(self)
-        self.canvas_adapt_timer.setSingleShot(True)
-        self.canvas_adapt_timer.timeout.connect(self.finish_canvas_auto_adapt)
         
-        self.btn_disconnect = QPushButton("⏏ 断开后端")
+        self.btn_disconnect = QPushButton("断开")
         self.btn_disconnect.setToolTip("立即停止软件读写并在后台释放通信后端；拔掉实际线路卡住时界面不会等待")
         self.btn_disconnect.clicked.connect(self.disconnect_backend)
 
-        self.btn_reconnect = QPushButton("🔌 通信重连")
+        self.btn_reconnect = QPushButton("重连")
+        self.btn_reconnect.setProperty("commandButton", True)
         self.btn_reconnect.setToolTip("重新启动并连接当前配置的通信后端，不复位 MCU")
         self.btn_reconnect.clicked.connect(self.force_reconnect_engine)
         
-        self.btn_mcu_reset = QPushButton("♻️ 复位")
-        self.btn_mcu_reset.setStyleSheet(
-            "background-color: #4a1515; color: #ff8a80; border: 1px solid #7f1d1d;" if self.is_dark_theme
-            else "background-color: #ffebee; color: #c62828; border: 1px solid #ef9a9a;"
-        )
+        self.btn_mcu_reset = QPushButton("复位")
+        self.btn_mcu_reset.setProperty("commandButton", True)
+        self.btn_mcu_reset.setProperty("commandRole", "reset")
         self.btn_mcu_reset.clicked.connect(self.trigger_manual_mcu_reset)
 
-        self.btn_flash = QPushButton("⚡ 烧录")
-        self.btn_flash.setStyleSheet(
-            "background-color: #5d3b00; color: #ffd54f; border: 1px solid #8a5a00;" if self.is_dark_theme
-            else "background-color: #fff3e0; color: #b45309; border: 1px solid #ffcc80;"
-        )
+        self.btn_flash = QPushButton("烧录")
+        self.btn_flash.setProperty("commandButton", True)
         self.btn_flash.setToolTip("只有点击并确认后才会擦写 Flash/复位；普通调试不复位 MCU")
         self.btn_flash.clicked.connect(self.flash_elf_by_user)
         self.btn_flash.setEnabled(self.config.backend_mode == "JLINK")
+        self.btn_disconnect.setProperty("commandButton", True)
 
-        top.addWidget(QLabel("📊 采样速率:"))
+        sampling_caption = QLabel("采样")
+        sampling_caption.setObjectName("fieldCaption")
+        top.addWidget(sampling_caption)
         top.addWidget(self.wave_hz_combo)
         top.addWidget(self.custom_hz_edit)
-        top.addWidget(self.btn_freeze)
-        top.addWidget(self.btn_canvas_adapt)
-        
-        top.addSpacing(10) 
-        top.addWidget(self.btn_disconnect)
-        top.addWidget(self.btn_reconnect) 
-        top.addWidget(self.btn_flash)
-        top.addWidget(self.btn_mcu_reset) 
-        top.addStretch()
-        
-        top.addWidget(QLabel("<b>🖼️ 画布布局:</b>"))
+
+        action_strip = QFrame()
+        action_strip.setObjectName("actionStrip")
+        action_layout = QHBoxLayout(action_strip)
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.setSpacing(0)
+        action_buttons = (self.btn_disconnect, self.btn_reconnect, self.btn_flash, self.btn_mcu_reset)
+        for index, button in enumerate(action_buttons):
+            position = "first" if index == 0 else ("last" if index == len(action_buttons) - 1 else "middle")
+            button.setProperty("segmentPosition", position)
+            button.setMinimumSize(78, 36)
+            action_layout.addWidget(button)
         self.layout_group = QButtonGroup(self)
-        self.rad_map1 = QRadioButton("单图")
-        self.rad_map2 = QRadioButton("双图")
-        self.rad_map3 = QRadioButton("三图")
+        self.rad_map1 = QPushButton("单图")
+        self.rad_map2 = QPushButton("双图")
+        self.rad_map3 = QPushButton("三图")
+        for button in (self.rad_map1, self.rad_map2, self.rad_map3):
+            button.setCheckable(True)
+            button.setProperty("plotTool", True)
+            button.setMinimumWidth(58)
+        self.rad_map1.setProperty("viewSegment", "first")
+        self.rad_map2.setProperty("viewSegment", "middle")
+        self.rad_map3.setProperty("viewSegment", "last")
         self.rad_map1.setToolTip("单图（1 行独占）")
         self.rad_map2.setToolTip("双图（2 行上下均匀）")
         self.rad_map3.setToolTip("三图（3 行上下均匀）")
@@ -1277,53 +1425,54 @@ class MCUStudioWindow(QMainWindow):
         self.layout_group.addButton(self.rad_map2, 2)
         self.layout_group.addButton(self.rad_map3, 3)
         self.rad_map1.setChecked(True)
-        top.addWidget(self.rad_map1)
-        top.addWidget(self.rad_map2)
-        top.addWidget(self.rad_map3)
         self.layout_group.idClicked.connect(self.handle_layout_changed)
-        layout.addLayout(top)
 
-        quick_input_bar = QHBoxLayout()
         self.input_name = QLineEdit()
-        self.input_name.setPlaceholderText("全局变量名或十六进制物理地址(如0x40012440)")
-        self.input_name.setFixedWidth(280)
+        self.input_name.setPlaceholderText("变量名或物理地址，例如 0x40012440")
+        self.input_name.setFixedWidth(260)
         
         self.input_type = QComboBox()
         self.input_type.addItems(["uint8", "int8", "uint16", "int16", "uint32", "int32", "int", "float"])
-        self.input_type.setFixedWidth(90)
+        self.input_type.setFixedWidth(115)
         self.input_type.currentIndexChanged.connect(lambda idx: self.db.save_config("last_input_type_idx", str(idx)))
         
-        btn_add = QPushButton("➕ 快捷添加监视")
+        btn_add = QPushButton("添加监视")
         btn_add.clicked.connect(self.quick_add_variable)
         
-        btn_adv_c = QPushButton("🚀 ELF 变量浏览器")
-        btn_adv_c.setStyleSheet("background-color: #0d47a1; color: white; font-weight: bold;")
+        btn_adv_c = QPushButton("ELF 变量浏览器")
+        btn_adv_c.setObjectName("primaryButton")
         btn_adv_c.clicked.connect(self.open_advance_parser_window)
 
-        quick_input_bar.addWidget(QLabel("<b>⚡ 快捷输入栏:</b>"))
-        quick_input_bar.addWidget(self.input_name)
-        quick_input_bar.addWidget(self.input_type)
-        quick_input_bar.addWidget(btn_add)
-        quick_input_bar.addSpacing(20)
-        quick_input_bar.addWidget(btn_adv_c)
-        quick_input_bar.addStretch()
-        layout.addLayout(quick_input_bar)
+        quick_caption = QLabel("变量")
+        quick_caption.setObjectName("fieldCaption")
+        top.addSpacing(10)
+        top.addWidget(quick_caption)
+        top.addWidget(self.input_name)
+        top.addWidget(self.input_type)
+        top.addWidget(btn_add)
+        top.addWidget(btn_adv_c)
+        top.addStretch()
+        top.addWidget(action_strip)
+        layout.addWidget(top_bar)
         
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.tab_widget = QTabWidget()
+        detachable_tab_bar = DetachableTabBar(self.tab_widget)
+        self.tab_widget.setTabBar(detachable_tab_bar)
         self.debug_trees = {}
         self.debug_titles = {}
         self.detached_debug_windows = {}
         self.tab_widget.setTabsClosable(False)
         self.tab_widget.setMovable(False)
         self.tab_widget.tabBarDoubleClicked.connect(self.detach_debug_tab)
+        detachable_tab_bar.detach_requested.connect(self.detach_debug_tab)
         self.tab_widget.currentChanged.connect(lambda: self.restart_sampling_thread())
 
         self.create_new_debug_tab("主调试窗口")
         self.create_new_debug_tab("调试窗口 2")
         self.create_new_debug_tab("调试窗口 3")
         self.tab_widget.setCurrentIndex(0)
-        self.tab_widget.setToolTip("双击标签可悬浮；关闭悬浮窗口后自动回到原标签。")
+        self.tab_widget.setToolTip("双击标签或将标签拖出可悬浮；关闭悬浮窗口后自动回到原位置。")
         self.main_splitter.addWidget(self.tab_widget)
         
         self.plot_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -1339,8 +1488,9 @@ class MCUStudioWindow(QMainWindow):
         for i in range(3):
             pw = pg.PlotWidget()
             pw.setBackground(self.theme_colors['plot_bg'])
-            pw.showGrid(x=True, y=True, alpha=0.2)
-            pw.setLabel('bottom', '时间滚动追踪轴', units='ms')
+            pw.showGrid(x=True, y=True, alpha=0.12)
+            pw.setLabel('bottom', '时间 (ms)')
+            pw.getAxis('bottom').enableAutoSIPrefix(False)
             for axis_name in ('left', 'bottom'):
                 axis = pw.getAxis(axis_name)
                 axis.setPen(pg.mkPen(self.theme_colors['axis']))
@@ -1372,17 +1522,45 @@ class MCUStudioWindow(QMainWindow):
             self.plot_widgets.append(pw)
             self.plot_splitter.addWidget(pw)
             
-        self.main_splitter.addWidget(self.plot_splitter)
+        plot_panel = QWidget()
+        plot_panel_layout = QVBoxLayout(plot_panel)
+        plot_panel_layout.setContentsMargins(0, 0, 0, 0)
+        plot_panel_layout.setSpacing(5)
+
+        plot_toolbar_widget = QWidget()
+        plot_toolbar_widget.setObjectName("plotToolbar")
+        plot_toolbar_widget.setFixedHeight(40)
+        self.plot_toolbar_widget = plot_toolbar_widget
+        plot_toolbar = QHBoxLayout(plot_toolbar_widget)
+        plot_toolbar.setContentsMargins(0, 0, 2, 0)
+        plot_toolbar.setSpacing(0)
+        plot_title = QLabel("实时波形")
+        plot_title.setObjectName("plotTitle")
+        plot_toolbar.addSpacing(12)
+        plot_toolbar.addWidget(plot_title)
+        plot_toolbar.addStretch()
+        plot_toolbar.addWidget(self.btn_freeze)
+        plot_toolbar.addWidget(self.btn_canvas_adapt)
+        plot_toolbar.addSpacing(10)
+        plot_toolbar.addWidget(self.rad_map1)
+        plot_toolbar.addWidget(self.rad_map2)
+        plot_toolbar.addWidget(self.rad_map3)
+        plot_panel_layout.addWidget(plot_toolbar_widget)
+        plot_panel_layout.addWidget(self.plot_splitter, 1)
+
+        self.main_splitter.addWidget(plot_panel)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
         self.main_splitter.setSizes([450, 1000])
-        layout.addWidget(self.main_splitter)
+        layout.addWidget(self.main_splitter, 1)
         
         bottom_bar = QHBoxLayout()
         bottom_bar.setContentsMargins(5, 4, 5, 4)
-        self.lbl_ch1 = QLabel("CH1: 📭 空闲")
-        self.lbl_ch2 = QLabel("CH2: 📭 空闲")
-        self.lbl_ch3 = QLabel("CH3: 📭 空闲")
+        self.lbl_ch1 = QLabel("CH1  空闲")
+        self.lbl_ch2 = QLabel("CH2  空闲")
+        self.lbl_ch3 = QLabel("CH3  空闲")
         
-        ch_style = ("font-family: 'Consolas'; font-size: 11px; font-weight: bold; padding: 2px 10px; "
+        ch_style = ("font-family: 'Consolas'; font-size: 13px; font-weight: bold; padding: 3px 11px; "
                     f"border-radius: 4px; background-color: {self.theme_colors['panel']}; border: 1px solid {self.theme_colors['panel_border']};")
         self.lbl_ch1.setStyleSheet(f"{ch_style} color: {self.ch_colors[0]};")
         self.lbl_ch2.setStyleSheet(f"{ch_style} color: {self.ch_colors[1]};")
@@ -1397,7 +1575,7 @@ class MCUStudioWindow(QMainWindow):
         self.lbl_led.setFixedSize(10, 10)
         self.lbl_led.setStyleSheet("background-color: #d32f2f; border-radius: 5px;")
         self.lbl_status_text = QLabel("正在连接...")
-        self.lbl_status_text.setStyleSheet("color: #757575; font-family: 'Microsoft YaHei'; font-size: 11px; font-weight: bold;")
+        self.lbl_status_text.setStyleSheet("color: #8b949e; font-family: 'Microsoft YaHei'; font-size: 13px; font-weight: bold;")
         
         bottom_bar.addWidget(self.lbl_led)
         bottom_bar.addWidget(self.lbl_status_text)
@@ -1419,7 +1597,7 @@ class MCUStudioWindow(QMainWindow):
             
         tree = QTreeWidget()
         tree.setColumnCount(3)
-        tree.setHeaderLabels(["全局变量", "底层数据类型", "实时物理数值 (5Hz后台)"])
+        tree.setHeaderLabels(["全局变量", "数据类型", "实时值（5 Hz）"])
         tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         tree.customContextMenuRequested.connect(self.show_context_menu)
@@ -1431,7 +1609,7 @@ class MCUStudioWindow(QMainWindow):
         self.debug_titles[slot] = name
         self.tab_widget.setCurrentIndex(new_idx)
 
-    def detach_debug_tab(self, tab_index):
+    def detach_debug_tab(self, tab_index, global_pos=None):
         tree = self.tab_widget.widget(tab_index)
         slot = self.debug_slot_for_tree(tree)
         if slot is None:
@@ -1445,6 +1623,8 @@ class MCUStudioWindow(QMainWindow):
         window.reattach_requested.connect(self.attach_debug_tab)
         self.detached_debug_windows[slot] = window
         window.show()
+        if global_pos is not None:
+            window.move(global_pos.x() - 80, global_pos.y() - 18)
         window.raise_()
         window.activateWindow()
 
@@ -1475,44 +1655,24 @@ class MCUStudioWindow(QMainWindow):
 
     def toggle_freeze(self):
         self.is_frozen = not self.is_frozen
+        self.btn_freeze.setChecked(self.is_frozen)
         if self.is_frozen:
-            self.btn_freeze.setText("▶️ 恢复滚动")
-            self.btn_freeze.setStyleSheet("background-color: #e65100; color: white; border: 1px solid #bf4a00;")
+            self.btn_freeze.setText("恢复")
         else:
-            self.btn_freeze.setText("❄️ 锁定滚动")
-            self.btn_freeze.setStyleSheet(
-                f"background-color: {self.theme_colors['neutral_button']}; color: {self.theme_colors['neutral_text']};"
-            )
+            self.btn_freeze.setText("锁定")
             for i in range(3):
                 if self.v_lines[i]: self.v_lines[i].setVisible(False)
                 if self.h_lines[i]: self.h_lines[i].setVisible(False)
                 if self.hover_dots[i]: self.hover_dots[i].setVisible(False)
                 if self.hover_labels[i]: self.hover_labels[i].setVisible(False)
 
-    @staticmethod
-    def _double_span_limits(minimum, maximum):
-        minimum, maximum = float(minimum), float(maximum)
-        span = maximum - minimum
-        if not np.isfinite(span) or span <= 0:
-            half_span = max(abs(minimum) * 0.1, 1.0)
-            return minimum - half_span, maximum + half_span
-        center = (minimum + maximum) / 2.0
-        return center - span, center + span
-
     def start_canvas_auto_adapt(self):
         if not any(self.ch_paths):
             QMessageBox.information(self, "一键自适应画布", "请先把至少一个变量绑定到波形通道。")
             return
-        self.reset_canvas_adapt_ranges()
-        self.canvas_adapt_start_ms = (time.time() - self.start_time) * 1000.0
-        self.btn_canvas_adapt.setEnabled(False)
-        self.btn_canvas_adapt.setText("⏳ 正在统计 2 秒范围…")
-        self.lbl_status_text.setText("正在采样画布自适应范围")
-        self.canvas_adapt_timer.start(2000)
+        self.finish_canvas_auto_adapt()
 
     def finish_canvas_auto_adapt(self):
-        start_ms = self.canvas_adapt_start_ms
-        self.canvas_adapt_start_ms = None
         adapted = 0
         with QMutexLocker(self.buffer_mutex):
             for plot_idx in range(3):
@@ -1523,8 +1683,9 @@ class MCUStudioWindow(QMainWindow):
                     timestamps = self.ch_time_stamps[channel_idx]
                     values = self.ch_buffers[channel_idx]
                     if not timestamps or not values: continue
-                    first = bisect.bisect_left(timestamps, start_ms) if start_ms is not None else 0
                     count = min(len(timestamps), len(values))
+                    newest_x = timestamps[count - 1]
+                    first = bisect.bisect_left(timestamps, newest_x - self.max_display_duration_ms)
                     if first >= count: continue
                     x_arr = np.asarray(timestamps[first:count], dtype=float)
                     y_arr = np.asarray(values[first:count], dtype=float)
@@ -1534,19 +1695,22 @@ class MCUStudioWindow(QMainWindow):
                         y_values.append(y_arr[finite])
                 if not x_values: continue
                 all_x, all_y = np.concatenate(x_values), np.concatenate(y_values)
-                x_lower, x_upper = self._double_span_limits(np.min(all_x), np.max(all_x))
-                y_lower, y_upper = self._double_span_limits(np.min(all_y), np.max(all_y))
+                x_upper = float(np.max(all_x))
+                x_lower = x_upper - self.max_display_duration_ms
+                y_min, y_max = float(np.min(all_y)), float(np.max(all_y))
+                y_span = y_max - y_min
+                y_padding = max(y_span * 0.08, abs(y_min) * 0.02, 0.01)
+                if not np.isfinite(y_span) or y_span <= 0:
+                    y_padding = max(abs(y_min) * 0.1, 1.0)
+                y_lower, y_upper = y_min - y_padding, y_max + y_padding
                 self.canvas_fixed_ranges[plot_idx] = (x_lower, x_upper, y_lower, y_upper)
                 self.plot_widgets[plot_idx].setXRange(x_lower, x_upper, padding=0)
                 self.plot_widgets[plot_idx].setYRange(y_lower, y_upper, padding=0)
                 adapted += 1
-        self.btn_canvas_adapt.setEnabled(True)
-        self.btn_canvas_adapt.setText("🎯 自适应画布")
         if adapted:
-            self.lbl_status_text.setText(f"已自适应 {adapted} 个画布（X/Y 跨度 ×2）")
+            self.lbl_status_text.setText(f"已适配 {adapted} 个波形视图")
         else:
-            self.lbl_status_text.setText("画布自适应失败：观察期间没有有效数据")
-            QMessageBox.warning(self, "一键自适应画布", "2 秒观察期间没有采集到有效波形数据。")
+            self.lbl_status_text.setText("暂无有效波形数据，稍后再试")
 
     def reset_canvas_adapt_ranges(self):
         self.canvas_fixed_ranges = [None, None, None]
@@ -1703,7 +1867,7 @@ class MCUStudioWindow(QMainWindow):
         self.jlink_native_instance = link
         self.flash_sequence_active = False
         self.backend_suspended = False
-        self.btn_flash.setText("⚡ 烧录")
+        self.btn_flash.setText("烧录")
         self.btn_flash.setEnabled(self.config.backend_mode == "JLINK")
         self.lbl_status_text.setText("烧录完成" if success else "烧录失败")
         if success:
@@ -1769,7 +1933,7 @@ class MCUStudioWindow(QMainWindow):
         self.btn_disconnect.setEnabled(False)
         self.btn_reconnect.setEnabled(True)
         self.lbl_status_text.setText("通信后端已断开（未复位 MCU）")
-        self.lbl_status_text.setStyleSheet("color: #f59e0b; font-family: 'Microsoft YaHei'; font-size: 11px; font-weight: bold;")
+        self.lbl_status_text.setStyleSheet("color: #f0a020; font-family: 'Microsoft YaHei'; font-size: 13px; font-weight: bold;")
 
     def _close_native_link_async(self, link, next_action=""):
         closer = BackendCloseWorker(link, self.jlink_lock, self)
@@ -1801,33 +1965,38 @@ class MCUStudioWindow(QMainWindow):
         self.lbl_status_text.setText("通信后端重连完成" if connected else "通信后端重连失败")
         self.restart_sampling_thread()
 
-    def _execute_flash_animation(self, button, target_color, base_style):
+    def _execute_flash_animation(self, button, target_color, base_style=""):
+        original_style = button.styleSheet()
         anim = QVariantAnimation(button)
-        anim.setDuration(220) 
-        anim.setStartValue(QColor(target_color))
-        anim.setEndValue(QColor(self.theme_colors['neutral_button']))
-        anim.valueChanged.connect(lambda val: button.setStyleSheet(f"{base_style} background-color: {val.name()};"))
+        anim.setDuration(220)
+        start_color = QColor(target_color).lighter(125)
+        end_color = QColor(target_color)
+        anim.setStartValue(start_color)
+        anim.setEndValue(end_color)
+        anim.valueChanged.connect(
+            lambda val: button.setStyleSheet(
+                f"background-color: {val.name()}; color: #ffffff; border: 1px solid {target_color};"
+            )
+        )
+        anim.finished.connect(lambda: button.setStyleSheet(original_style))
+        button._feedback_animation = anim
         anim.start()
 
     def handle_layout_changed(self, layout_id):
         self.layout_switching = True
         self.current_layout_id = layout_id
         self.db.save_config("last_layout_id", str(layout_id))
-        
-        with QMutexLocker(self.buffer_mutex):
-            for i in range(3):
-                should_visible = (i == 0) or (i == 1 and layout_id >= 2) or (i == 2 and layout_id == 3)
-                pw = self.plot_widgets[i]
-                if should_visible: pw.setVisible(True)
-                else:
-                    pw.setVisible(False)
-                    try: pw.getPlotItem().clear()
-                    except: pass
-                    self.plot_curves_dict[i].clear()
-                    if self.v_lines[i]: self.v_lines[i].setVisible(False)
-                    if self.h_lines[i]: self.h_lines[i].setVisible(False)
-                    if self.hover_dots[i]: self.hover_dots[i].setVisible(False)
-                    if self.hover_labels[i]: self.hover_labels[i].setVisible(False)
+
+        # Keep plot items alive while changing layout. Clearing and rebuilding
+        # them caused a visible pause and also discarded crosshair overlays.
+        for i, pw in enumerate(self.plot_widgets):
+            should_visible = (i == 0) or (i == 1 and layout_id >= 2) or (i == 2 and layout_id == 3)
+            pw.setVisible(should_visible)
+            if not should_visible:
+                if self.v_lines[i]: self.v_lines[i].setVisible(False)
+                if self.h_lines[i]: self.h_lines[i].setVisible(False)
+                if self.hover_dots[i]: self.hover_dots[i].setVisible(False)
+                if self.hover_labels[i]: self.hover_labels[i].setVisible(False)
         
         container_height = self.plot_splitter.height() or 600
         if layout_id == 1: self.plot_splitter.setSizes([container_height, 0, 0])
@@ -1837,10 +2006,11 @@ class MCUStudioWindow(QMainWindow):
         elif layout_id == 3:
             h = container_height // 3
             self.plot_splitter.setSizes([h, h, h])
-        QTimer.singleShot(100, self._reset_layout_switching_flag)
+        QTimer.singleShot(0, self._reset_layout_switching_flag)
 
     def _reset_layout_switching_flag(self):
         self.layout_switching = False
+        self.update_plot_canvas()
 
     def restore_layout_and_type_configs(self):
         try:
@@ -2098,12 +2268,13 @@ class MCUStudioWindow(QMainWindow):
         self.ch_buffers[ch_idx] = []
         self.ch_time_stamps[ch_idx] = []
         if path not in self.plot_active_paths[ch_idx]: self.plot_active_paths[ch_idx].append(path)
-        
+        del locker
+
         self.refresh_ui_channel_bar()
         self.reset_canvas_adapt_ranges()
         self.restart_sampling_thread()
 
-    def unbind_channel(self, ch_idx):
+    def unbind_channel(self, ch_idx, restart=True):
         locker = QMutexLocker(self.buffer_mutex)
         path = self.ch_paths[ch_idx]
         if path:
@@ -2119,14 +2290,16 @@ class MCUStudioWindow(QMainWindow):
         self.ch_addrs[ch_idx] = None
         self.ch_buffers[ch_idx] = []
         self.ch_time_stamps[ch_idx] = []
+        del locker
         self.refresh_ui_channel_bar()
         self.reset_canvas_adapt_ranges()
-        self.restart_sampling_thread()
+        if restart:
+            self.restart_sampling_thread()
 
     def refresh_ui_channel_bar(self):
         labels = [self.lbl_ch1, self.lbl_ch2, self.lbl_ch3]
         for i in range(3):
-            labels[i].setText(f"CH{i+1}: {self.ch_paths[i]} 🔄" if self.ch_paths[i] else f"CH{i+1}: 📭 空闲")
+            labels[i].setText(f"CH{i+1}  {self.ch_paths[i]}" if self.ch_paths[i] else f"CH{i+1}  空闲")
 
     def quick_add_variable(self):
         name = self.input_name.text().strip()
@@ -2243,13 +2416,19 @@ class MCUStudioWindow(QMainWindow):
         current_tab_idx = self.debug_slot_for_tree(tree)
         if current_tab_idx is None: return
         root_name = root_item.text(0)
-        for path, _, _, _, t_idx in self.db.get_all_vars():
-            # 💡 【完美修复】：彻底移除掉混入的 nudge 噪声单词，恢复纯净的逻辑判断
+        removed_paths = set()
+        for path, _, _, _, t_idx in list(self.db.get_all_vars()):
             if t_idx == current_tab_idx and (path == root_name or path.startswith(root_name + ".") or path.startswith(root_name + "[")):
                 self.db.delete_var(path, current_tab_idx)
-                for i in range(3):
-                    if self.ch_paths[i] == path: self.unbind_channel(i)
-                        
+                removed_paths.add(path)
+
+        # A waveform binding is global. Keep it alive while the same variable
+        # still exists in another debug window.
+        remaining_paths = {row[0] for row in self.db.get_all_vars()}
+        for channel_idx, path in enumerate(list(self.ch_paths)):
+            if path in removed_paths and path not in remaining_paths:
+                self.unbind_channel(channel_idx, restart=False)
+
         if tree:
             index = tree.indexOfTopLevelItem(root_item)
             if index >= 0: tree.takeTopLevelItem(index)
@@ -2313,13 +2492,14 @@ class MCUStudioWindow(QMainWindow):
             if window.isVisible()
         )
         db_vars_by_tab = {slot: self.db.get_var_map(slot) for slot in active_tabs}
+        read_cache = {}
         labels = [self.lbl_ch1, self.lbl_ch2, self.lbl_ch3]
         locker = QMutexLocker(self.buffer_mutex)
         
         for i in range(3):
             if self.ch_paths[i]:
                 labels[i].setText(f"CH{i+1}: {self.ch_buffers[i][-1]:.2f}" if (self.ch_buffers[i] and (self.config.backend_mode == "JLINK" or self.openocd_link_alive)) else f"CH{i+1}: 断开")
-            else: labels[i].setText(f"CH{i+1}: 📭 空闲")
+            else: labels[i].setText(f"CH{i+1}  空闲")
         del locker
 
         def refresh_item(item, t_idx):
@@ -2353,12 +2533,20 @@ class MCUStudioWindow(QMainWindow):
                 base_addr = self.symbol_cache.get(base_var)
                 if base_addr is None: return
                 absolute_address = base_addr + offset
-            
+
+            cache_key = (path, absolute_address, v_type.strip())
+            if cache_key in read_cache:
+                item.setText(2, read_cache[cache_key])
+                for idx in range(item.childCount()): refresh_item(item.child(idx), t_idx)
+                return
+
             try:
                 type_info = self.type_info_for_path(path)
                 if type_info is not None and scalar_size(type_info):
                     value = self.decode_value(self.read_memory_bytes(absolute_address, scalar_size(type_info)), type_info)
-                    item.setText(2, f"{value:.4f}" if isinstance(value, float) else str(value))
+                    display_value = f"{value:.4f}" if isinstance(value, float) else str(value)
+                    read_cache[cache_key] = display_value
+                    item.setText(2, display_value)
                     for idx in range(item.childCount()): refresh_item(item.child(idx), t_idx)
                     return
                 norm_type = v_type.strip()
@@ -2385,8 +2573,12 @@ class MCUStudioWindow(QMainWindow):
                 elif "float" in norm_type: v = struct.unpack('<f', struct.pack('<I', raw_int & 0xFFFFFFFF))[0]
                 elif is_custom_enum: v = raw_int & 0xFF
                 else: v = struct.unpack('<i', struct.pack('<I', raw_int & 0xFFFFFFFF))[0]
-                item.setText(2, f"{v:.4f}" if "float" in norm_type else str(v))
-            except: item.setText(2, "断开")
+                display_value = f"{v:.4f}" if "float" in norm_type else str(v)
+                read_cache[cache_key] = display_value
+                item.setText(2, display_value)
+            except:
+                read_cache[cache_key] = "断开"
+                item.setText(2, "断开")
             for idx in range(item.childCount()): refresh_item(item.child(idx), t_idx)
 
         for tab_index in sorted(active_tabs):
@@ -2455,11 +2647,11 @@ class MCUStudioWindow(QMainWindow):
             self.heartbeat_state = not self.heartbeat_state
             self.lbl_led.setStyleSheet(f"background-color: {'#00E676' if self.heartbeat_state else '#00b252'}; border-radius: 5px;")
             self.lbl_status_text.setText(f"调试在线 ({self.config.backend_mode})")
-            self.lbl_status_text.setStyleSheet(f"color: {self.theme_colors['status_ok']}; font-family: 'Microsoft YaHei'; font-size: 11px; font-weight: bold;")
+            self.lbl_status_text.setStyleSheet(f"color: {self.theme_colors['status_ok']}; font-family: 'Microsoft YaHei'; font-size: 13px; font-weight: bold;")
         else:
             self.lbl_led.setStyleSheet("background-color: #d32f2f; border-radius: 5px;")
             self.lbl_status_text.setText("通信后端已断开" if self.backend_suspended else "链路断开")
-            self.lbl_status_text.setStyleSheet("color: #d32f2f; font-family: 'Microsoft YaHei'; font-size: 11px; font-weight: bold;")
+            self.lbl_status_text.setStyleSheet("color: #ef5350; font-family: 'Microsoft YaHei'; font-size: 13px; font-weight: bold;")
 
     def closeEvent(self, event):
         if self.flash_sequence_active:
@@ -2490,6 +2682,10 @@ class MCUStudioWindow(QMainWindow):
 def run_application() -> int:
     """Create the Qt application and run the login/main-window flow."""
     app = QApplication(sys.argv)
+    bundle_root = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    icon_path = os.path.join(bundle_root, "assets", "mcu_studio_anime.png")
+    if os.path.isfile(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
     pg.setConfigOption("foreground", "#e0e0e0")
     app.setStyleSheet(DARK_STYLE)
     db = LiveWatchDB()

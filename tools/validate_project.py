@@ -26,11 +26,27 @@ def check(condition: bool, message: str) -> None:
 
 
 def validate_compilation() -> None:
-    files = [PROJECT_ROOT / "main.py", PROJECT_ROOT / "build.py", Path(__file__)]
+    files = [
+        PROJECT_ROOT / "main.py",
+        PROJECT_ROOT / "build.py",
+        PROJECT_ROOT / "packaging" / "Mcu_Studio.spec",
+        Path(__file__),
+    ]
     for path in files:
         source = path.read_text(encoding="utf-8")
         compile(source, str(path), "exec")
     check(compileall.compile_dir(PROJECT_ROOT / "mcu_studio", quiet=1), "all application modules compile")
+
+    import build as build_config
+
+    build_config.validate_project_layout()
+    check(
+        build_config.ICON_PNG.name == "mcu_studio_anime.png"
+        and build_config.ICON_FILE.name == "mcu_studio_anime.ico"
+        and build_config.ICON_PNG.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+        and build_config.ICON_FILE.read_bytes().startswith(b"\x00\x00\x01\x00"),
+        "anime application icon is valid and wired into the build",
+    )
 
 
 def validate_imports_and_elf_helpers() -> None:
@@ -46,6 +62,8 @@ def validate_imports_and_elf_helpers() -> None:
     address, _type = database.resolve("value")
     check(address == 0x20000000, "ELF expression resolver executes")
 
+    from PyQt6.QtCore import QPoint
+    from PyQt6.QtTest import QTest
     from PyQt6.QtWidgets import QApplication
 
     application = QApplication.instance() or QApplication([])
@@ -95,8 +113,83 @@ def validate_imports_and_elf_helpers() -> None:
         application.processEvents()
         check(studio.tab_widget.count() == 3, "three fixed debug windows are created")
         check(studio.debug_trees[0].headerItem().text(0) == "全局变量", "debug variable column uses the compact title")
+        check(
+            studio.top_bar.height() < 60
+            and studio.plot_toolbar_widget.height() == 40
+            and studio.centralWidget().layout().stretch(1) == 1,
+            "toolbars stay compact while the workspace receives all spare height",
+        )
+        action_buttons = (
+            studio.btn_disconnect,
+            studio.btn_reconnect,
+            studio.btn_flash,
+            studio.btn_mcu_reset,
+        )
+        check(
+            [button.property("segmentPosition") for button in action_buttons]
+            == ["first", "middle", "middle", "last"],
+            "toolbar actions form one connected segmented group",
+        )
+        check(
+            studio.btn_freeze.property("plotTool")
+            and studio.btn_canvas_adapt.property("plotTool")
+            and studio.rad_map1.isCheckable(),
+            "waveform controls use the compact plot toolbar",
+        )
+        bottom_axis = studio.plot_widgets[0].getAxis("bottom")
+        check(
+            "ms" in bottom_axis.labelText and not bottom_axis.labelUnits,
+            "waveform time axis stays in raw milliseconds without SI prefixes",
+        )
+        preserved_curve = studio.plot_widgets[1].plot([0.0, 1.0], [1.0, 2.0])
+        studio.plot_active_paths[1].append("layout-test")
+        studio.plot_curves_dict[1]["layout-test"] = preserved_curve
+        studio.handle_layout_changed(1)
+        studio.handle_layout_changed(2)
+        application.processEvents()
+        check(
+            studio.plot_curves_dict[1].get("layout-test") is preserved_curve,
+            "switching waveform layouts preserves plot items instead of rebuilding them",
+        )
+        studio.plot_widgets[1].removeItem(preserved_curve)
+        studio.plot_curves_dict[1].clear()
+        studio.plot_active_paths[1].remove("layout-test")
+        original_reconnect_style = studio.btn_reconnect.styleSheet()
+        studio._execute_flash_animation(studio.btn_reconnect, "#0a84ff")
+        QTest.qWait(260)
+        check(
+            studio.btn_reconnect.text() == "重连"
+            and studio.btn_reconnect.styleSheet() == original_reconnect_style,
+            "button feedback preserves text and restores theme colors",
+        )
+        studio.ch_paths[0] = "preview.value"
+        studio.plot_active_paths[0] = ["preview.value"]
+        studio.ch_time_stamps[0] = [0.0, 1000.0, 2000.0]
+        studio.ch_buffers[0] = [1.0, 3.0, 2.0]
+        studio.start_canvas_auto_adapt()
+        check(
+            studio.canvas_fixed_ranges[0] is not None
+            and studio.lbl_status_text.text().startswith("已适配"),
+            "waveform fit uses buffered data immediately without a delay timer",
+        )
+        studio.db.save_var("shared_value", "uint32", 0, "0x20000000", 0)
+        studio.db.save_var("shared_value", "uint32", 0, "0x20000000", 1)
+        studio.inject_var_to_tree_ui("shared_value", "uint32", 0)
+        studio.ch_paths[0] = "shared_value"
+        shared_root = studio.debug_trees[0].topLevelItem(0)
+        studio.remove_variable_root(shared_root, studio.debug_trees[0])
+        check(
+            studio.ch_paths[0] == "shared_value",
+            "removing one duplicate watch keeps the shared waveform binding",
+        )
+        studio.db.delete_var("shared_value", 1)
+        studio.ch_paths[0] = None
+        studio.ch_buffers[0] = []
+        studio.ch_time_stamps[0] = []
         original_tree = studio.debug_trees[1]
-        studio.detach_debug_tab(1)
+        detachable_bar = studio.tab_widget.tabBar()
+        check(hasattr(detachable_bar, "detach_requested"), "debug tabs support drag-out detaching")
+        detachable_bar.detach_requested.emit(1, QPoint(120, 80))
         application.processEvents()
         check(
             1 in studio.detached_debug_windows and studio.tab_widget.count() == 2,

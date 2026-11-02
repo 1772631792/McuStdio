@@ -19,7 +19,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 ENTRY_SCRIPT = PROJECT_ROOT / "main.py"
 PACKAGE_DIR = PROJECT_ROOT / "mcu_studio"
 SPEC_FILE = PROJECT_ROOT / "packaging" / "Mcu_Studio.spec"
-ICON_FILE = PROJECT_ROOT / "assets" / "mcu_studio.ico"
+ICON_PNG = PROJECT_ROOT / "assets" / "mcu_studio_anime.png"
+ICON_FILE = PROJECT_ROOT / "assets" / "mcu_studio_anime.ico"
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 BUILD_ROOT = ARTIFACTS_DIR / "build"
 DIST_DIR = PROJECT_ROOT / "dist"
@@ -31,6 +32,7 @@ REQUIRED_SOURCE_FILES = (
     PACKAGE_DIR / "workers.py",
     PACKAGE_DIR / "ui.py",
     SPEC_FILE,
+    ICON_PNG,
     ICON_FILE,
 )
 
@@ -122,6 +124,8 @@ def main() -> int:
     env = os.environ.copy()
     env["MCU_STUDIO_APP_NAME"] = app_name
     env["MCU_STUDIO_ENTRY_SCRIPT"] = str(ENTRY_SCRIPT)
+    env["MCU_STUDIO_ICON_PNG"] = str(ICON_PNG)
+    env["MCU_STUDIO_ICON_FILE"] = str(ICON_FILE)
     env["PYQTGRAPH_QT_LIB"] = "PyQt6"
     env["QT_API"] = "pyqt6"
 
@@ -145,6 +149,7 @@ def main() -> int:
 
     inspect_archive(executable, env)
     print(f"\nEntry point: {ENTRY_SCRIPT}")
+    print(f"Application icon: {ICON_FILE}")
     print(f"Build succeeded: {executable}")
     print("Qt audit passed: PyQt6 only.")
     return 0

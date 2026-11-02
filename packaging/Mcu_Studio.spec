@@ -7,7 +7,14 @@ entry_script = os.environ.get(
     'MCU_STUDIO_ENTRY_SCRIPT',
     os.path.join(project_root, 'main.py'),
 )
-icon_file = os.path.join(project_root, 'assets', 'mcu_studio.ico')
+icon_file = os.environ.get(
+    'MCU_STUDIO_ICON_FILE',
+    os.path.join(project_root, 'assets', 'mcu_studio_anime.ico'),
+)
+icon_png = os.environ.get(
+    'MCU_STUDIO_ICON_PNG',
+    os.path.join(project_root, 'assets', 'mcu_studio_anime.png'),
+)
 app_name = os.environ.get('MCU_STUDIO_APP_NAME', 'Mcu_Studio')
 
 # pyqtgraph can discover several installed Qt bindings. Pin both common
@@ -19,7 +26,7 @@ a = Analysis(
     [entry_script],
     pathex=[project_root],
     binaries=[],
-    datas=[],
+    datas=[(icon_png, 'assets')],
     hiddenimports=['pylink', 'elftools'],
     hookspath=[],
     hooksconfig={},

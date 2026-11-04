@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QFormLayout, QCheckBox as _QCheckBox, QSplitter, QTextEdit,
                              QRadioButton, QButtonGroup, QTabWidget, QFrame, QTabBar,
                              QStyle, QStyleOptionButton, QProgressBar)
-from PyQt6.QtCore import QTimer, Qt, pyqtSignal, QVariantAnimation, QMutex, QMutexLocker
+from PyQt6.QtCore import QTimer, Qt, QEvent, pyqtSignal, QVariantAnimation, QMutex, QMutexLocker
 from PyQt6.QtGui import (QFont, QKeyEvent, QIntValidator, QDoubleValidator, QColor,
                          QAction, QPen, QIcon, QPainter, QPalette, QPainterPath)
 
@@ -449,9 +449,6 @@ class FloatingDebugWindow(QDialog):
                 while item.parent():
                     item = item.parent()
                 owner.remove_variable_root(item, tree)
-            return
-        if event.key() == Qt.Key.Key_Space and owner and hasattr(owner, "toggle_freeze"):
-            owner.toggle_freeze()
             return
         super().keyPressEvent(event)
 
@@ -1218,6 +1215,9 @@ class MCUStudioWindow(QMainWindow):
         self.init_global_link_backend()
         self.load_elf_symbols()  
         self.init_ui()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         
         self.restore_layout_and_type_configs()
 
@@ -1509,10 +1509,20 @@ class MCUStudioWindow(QMainWindow):
                     root_item = item
                     while root_item.parent(): root_item = root_item.parent()
                     self.remove_variable_root(root_item)
-        elif event.key() == Qt.Key.Key_Space:
-            self.toggle_freeze()
         else:
             super().keyPressEvent(event)
+
+    def eventFilter(self, watched, event):
+        if event.type() in (
+            QEvent.Type.ShortcutOverride,
+            QEvent.Type.KeyPress,
+            QEvent.Type.KeyRelease,
+        ) and event.key() == Qt.Key.Key_Space:
+            if event.type() == QEvent.Type.KeyPress and not event.isAutoRepeat():
+                self.toggle_freeze()
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
 
     def init_ui(self):
         main_widget = QWidget()
@@ -1540,10 +1550,10 @@ class MCUStudioWindow(QMainWindow):
         self.custom_hz_edit.setValidator(QIntValidator(1, 8000, self))
         self.custom_hz_edit.editingFinished.connect(self.restart_sampling_thread)
         
-        self.btn_freeze = QPushButton("锁定")
+        self.btn_freeze = QPushButton("暂停")
         self.btn_freeze.setProperty("plotTool", True)
         self.btn_freeze.setCheckable(True)
-        self.btn_freeze.setToolTip("锁定/恢复波形时间轴滚动（空格键）")
+        self.btn_freeze.setToolTip("全局空格键：暂停/继续波形显示")
         self.btn_freeze.clicked.connect(self.toggle_freeze)
 
         self.btn_canvas_adapt = QPushButton("适配")
@@ -1752,26 +1762,28 @@ class MCUStudioWindow(QMainWindow):
         self.lbl_ch1.setStyleSheet(f"{ch_style} color: {self.ch_colors[0]};")
         self.lbl_ch2.setStyleSheet(f"{ch_style} color: {self.ch_colors[1]};")
         self.lbl_ch3.setStyleSheet(f"{ch_style} color: {self.ch_colors[2]};")
+        for label in (self.lbl_ch1, self.lbl_ch2, self.lbl_ch3):
+            label.setFixedWidth(170)
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         
         bottom_bar.addWidget(self.lbl_ch1)
         bottom_bar.addWidget(self.lbl_ch2)
         bottom_bar.addWidget(self.lbl_ch3)
-        bottom_bar.addSpacing(10)
+        bottom_bar.addStretch()
 
         self.flash_status_widget = QWidget()
+        self.flash_status_widget.setFixedWidth(270)
         flash_status_layout = QHBoxLayout(self.flash_status_widget)
         flash_status_layout.setContentsMargins(0, 0, 0, 0)
         flash_status_layout.setSpacing(8)
         self.lbl_flash_progress = QLabel("FLASH READY")
-        self.lbl_flash_progress.setMinimumWidth(112)
+        self.lbl_flash_progress.setFixedWidth(112)
         self.lbl_flash_progress.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.flash_progress = QProgressBar()
         self.flash_progress.setFixedSize(150, 14)
         self.flash_progress.setTextVisible(False)
         flash_status_layout.addWidget(self.lbl_flash_progress)
         flash_status_layout.addWidget(self.flash_progress)
-        bottom_bar.addWidget(self.flash_status_widget)
-        bottom_bar.addStretch()
         
         self.lbl_led = QLabel()
         self.lbl_led.setFixedSize(10, 10)
@@ -1781,6 +1793,8 @@ class MCUStudioWindow(QMainWindow):
         
         bottom_bar.addWidget(self.lbl_led)
         bottom_bar.addWidget(self.lbl_status_text)
+        bottom_bar.addSpacing(20)
+        bottom_bar.addWidget(self.flash_status_widget)
         
         bottom_wrapper = QWidget()
         bottom_wrapper.setFixedHeight(28) 
@@ -1860,9 +1874,9 @@ class MCUStudioWindow(QMainWindow):
         self.is_frozen = not self.is_frozen
         self.btn_freeze.setChecked(self.is_frozen)
         if self.is_frozen:
-            self.btn_freeze.setText("恢复")
+            self.btn_freeze.setText("继续")
         else:
-            self.btn_freeze.setText("锁定")
+            self.btn_freeze.setText("暂停")
             for i in range(3):
                 if self.v_lines[i]: self.v_lines[i].setVisible(False)
                 if self.h_lines[i]: self.h_lines[i].setVisible(False)
@@ -2703,6 +2717,12 @@ class MCUStudioWindow(QMainWindow):
         labels = [self.lbl_ch1, self.lbl_ch2, self.lbl_ch3]
         for i in range(3):
             labels[i].setText(f"CH{i+1}  {self.ch_paths[i]}" if self.ch_paths[i] else f"CH{i+1}  空闲")
+            labels[i].setToolTip(self.ch_paths[i] or "")
+
+    @staticmethod
+    def format_channel_value(value):
+        """Keep the bottom channel display compact and width-stable."""
+        return f"{float(value):.6g}"
 
     def quick_add_variable(self):
         name = self.input_name.text().strip()
@@ -2923,7 +2943,7 @@ class MCUStudioWindow(QMainWindow):
             if path:
                 value = channel_values[index]
                 labels[index].setText(
-                    f"CH{index + 1}: {value:.2f}" if value is not None and connected
+                    f"CH{index + 1}: {self.format_channel_value(value)}" if value is not None and connected
                     else f"CH{index + 1}: 断开"
                 )
             else:
@@ -3127,6 +3147,9 @@ class MCUStudioWindow(QMainWindow):
         # here can block forever after USB removal, so never hold the GUI close
         # event on the vendor DLL.
         self.jlink_native_instance = None
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         event.accept()
 
 

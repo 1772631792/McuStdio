@@ -72,7 +72,7 @@ def validate_imports_and_elf_helpers() -> None:
     address, _type = database.resolve("value")
     check(address == 0x20000000, "ELF expression resolver executes")
 
-    from PyQt6.QtCore import QPoint
+    from PyQt6.QtCore import QPoint, Qt
     from PyQt6.QtTest import QTest
     from PyQt6.QtWidgets import QApplication
 
@@ -146,11 +146,52 @@ def validate_imports_and_elf_helpers() -> None:
             and studio.rad_map1.isCheckable(),
             "waveform controls use the compact plot toolbar",
         )
+        ch2_x_before = studio.lbl_ch2.x()
+        studio.lbl_ch1.setText("CH1: -1.23457e+12")
+        application.processEvents()
+        check(
+            all(label.width() == 170 for label in (studio.lbl_ch1, studio.lbl_ch2, studio.lbl_ch3))
+            and studio.lbl_ch2.x() == ch2_x_before
+            and studio.format_channel_value(-123456789.0) == "-1.23457e+08",
+            "channel cards keep fixed positions for negative and wide values",
+        )
+        reconnect_clicks = []
+        studio.btn_reconnect.clicked.disconnect()
+        studio.btn_reconnect.clicked.connect(lambda: reconnect_clicks.append(True))
+        studio.btn_reconnect.setFocus()
+        QTest.keyClick(studio.btn_reconnect, Qt.Key.Key_Space)
+        application.processEvents()
+        check(
+            studio.is_frozen
+            and studio.btn_freeze.text() == "继续"
+            and not reconnect_clicks,
+            "global Space pauses the waveform without activating a focused action button",
+        )
+        studio.input_name.setText("watch_value")
+        studio.input_name.setFocus()
+        QTest.keyClick(studio.input_name, Qt.Key.Key_Space)
+        application.processEvents()
+        check(
+            not studio.is_frozen
+            and studio.btn_freeze.text() == "暂停"
+            and studio.input_name.text() == "watch_value",
+            "global Space resumes the waveform and has no text-input side effect",
+        )
         studio._set_flash_progress("success")
         check(
             studio.lbl_flash_progress.text() == "DOWNLOAD OK"
             and studio.flash_progress.value() == 100,
             "flash result is shown in the compact bottom progress strip",
+        )
+        flash_x_before = studio.flash_status_widget.mapTo(studio, QPoint(0, 0)).x()
+        splitter_width = max(studio.main_splitter.width(), 1000)
+        studio.main_splitter.setSizes([700, max(splitter_width - 700, 300)])
+        application.processEvents()
+        flash_x_after = studio.flash_status_widget.mapTo(studio, QPoint(0, 0)).x()
+        check(
+            flash_x_before == flash_x_after
+            and studio.flash_status_widget.width() == 270,
+            "flash progress remains fixed at the bottom-right when the left pane is resized",
         )
         studio._set_flash_progress("idle")
         bottom_axis = studio.plot_widgets[0].getAxis("bottom")

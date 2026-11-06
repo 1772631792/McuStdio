@@ -1,6 +1,7 @@
 # MCU Studio user interface
 import sys
 import csv
+import json
 import socket
 import re
 import time
@@ -478,53 +479,293 @@ class FloatingDebugWindow(QDialog):
 
 class ElfVariableDialog(QDialog):
     MAX_VISIBLE_RESULTS = 2000
+    MAX_PREVIEW_ARRAY_ELEMENTS = 256
+    RECENT_VARIABLES_KEY = "elf_recent_variables_v1"
     symbol_selected_signal = pyqtSignal(str, int)
     reload_requested_signal = pyqtSignal()
+
     def __init__(self, elf_db, parent=None):
-        super().__init__(parent); self.elf_db = elf_db
-        self.setWindowTitle("ELF 变量浏览器（符号表 + DWARF）"); self.resize(780, 620)
-        layout = QVBoxLayout(self); self.search = QLineEdit(); self.search.setPlaceholderText("搜索 ELF 全局变量…"); layout.addWidget(self.search)
-        self.elf_status = QLabel(); layout.addWidget(self.elf_status)
-        self.tree = QTreeWidget(); self.tree.setColumnCount(4); self.tree.setHeaderLabels(["变量", "DWARF 类型", "地址", "存储属性"]); self.tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); layout.addWidget(self.tree)
+        super().__init__(parent)
+        self.elf_db = elf_db
+        self.current_source = ""
+        self.recent_variables = self._load_recent_variables()
+        self.setWindowTitle("ELF 变量浏览器")
+        self.resize(1040, 680)
+        self.setMinimumSize(820, 520)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 14)
+        layout.setSpacing(10)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("模糊搜索变量名、类型或源文件…")
+        self.search.setClearButtonEnabled(True)
+        layout.addWidget(self.search)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
+        source_panel = QFrame()
+        source_panel.setObjectName("heroPanel")
+        source_layout = QVBoxLayout(source_panel)
+        source_layout.setContentsMargins(8, 8, 8, 8)
+        source_layout.setSpacing(6)
+        source_header = QHBoxLayout()
+        source_header.setSpacing(6)
+        source_title = QLabel("源文件")
+        source_title.setObjectName("sectionTitle")
+        source_header.addWidget(source_title)
+        source_header.addStretch()
+        self.source_search = QLineEdit()
+        self.source_search.setPlaceholderText("筛选文件…")
+        self.source_search.setClearButtonEnabled(True)
+        self.source_search.setFixedWidth(125)
+        source_header.addWidget(self.source_search)
+        source_layout.addLayout(source_header)
+        self.source_tree = QTreeWidget()
+        self.source_tree.setHeaderHidden(True)
+        self.source_tree.setRootIsDecorated(False)
+        self.source_tree.setAlternatingRowColors(True)
+        self.source_tree.setUniformRowHeights(True)
+        source_layout.addWidget(self.source_tree)
+        splitter.addWidget(source_panel)
+
+        variable_panel = QFrame()
+        variable_panel.setObjectName("heroPanel")
+        variable_layout = QVBoxLayout(variable_panel)
+        variable_layout.setContentsMargins(8, 8, 8, 8)
+        variable_layout.setSpacing(6)
+        variable_title = QLabel("变量与类型")
+        variable_title.setObjectName("sectionTitle")
+        variable_layout.addWidget(variable_title)
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(4)
+        self.tree.setHeaderLabels(["变量", "类型", "来源", "地址"])
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in (1, 2, 3):
+            self.tree.header().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        variable_layout.addWidget(self.tree)
+        splitter.addWidget(variable_panel)
+        splitter.setSizes([235, 765])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter, 1)
+
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_add_menu)
+        self.tree.itemExpanded.connect(self._expand_item)
         buttons = QHBoxLayout()
-        reload_button = QPushButton("重新提取当前 ELF")
+        self.elf_status = QLabel()
+        self.elf_status.setObjectName("appSubtitle")
+        buttons.addWidget(self.elf_status, 1)
+        reload_button = QPushButton("重新提取 ELF")
         reload_button.setToolTip("重新读取当前 ELF 的符号表和 DWARF，并刷新已有监视变量的地址与结构")
         reload_button.clicked.connect(lambda: self.reload_requested_signal.emit())
-        buttons.addWidget(reload_button); buttons.addStretch()
-        add = QPushButton("添加到当前调试窗口"); add.clicked.connect(lambda: self._accept_item()); buttons.addWidget(add); layout.addLayout(buttons)
-        self._sorted_symbol_names = sorted(self.elf_db.symbols, key=str.casefold)
+        buttons.addWidget(reload_button)
+        add = QPushButton("添加到当前调试窗口")
+        add.setObjectName("primaryButton")
+        add.clicked.connect(lambda: self._accept_item(close_dialog=False))
+        buttons.addWidget(add)
+        layout.addLayout(buttons)
+
+        self._sorted_symbol_names = []
+        self._rebuild_source_index()
         self.search_timer = QTimer(self)
         self.search_timer.setSingleShot(True)
         self.search_timer.setInterval(150)
         self.search_timer.timeout.connect(self._fill)
         self.search.textChanged.connect(lambda: self.search_timer.start())
-        self.tree.itemDoubleClicked.connect(lambda *_: self._accept_item()); self._fill()
+        self.source_search.textChanged.connect(self._fill_source_tree)
+        self.source_tree.itemSelectionChanged.connect(self._source_changed)
+        self.tree.itemDoubleClicked.connect(lambda *_: self._accept_item(close_dialog=False))
+        self._fill()
+
+    @staticmethod
+    def _is_container(info):
+        return bool(info and info.get("kind") in ("struct", "union", "array"))
+
+    def _load_recent_variables(self):
+        database = getattr(self.parent(), "db", None)
+        if database is None:
+            return {}
+        try:
+            payload = json.loads(database.get_config(self.RECENT_VARIABLES_KEY, "{}"))
+            return payload if isinstance(payload, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+
+    def _record_recent_variable(self, root):
+        database = getattr(self.parent(), "db", None)
+        if database is None:
+            return
+        entry = self.recent_variables.get(root, {})
+        self.recent_variables[root] = {
+            "count": int(entry.get("count", 0)) + 1,
+            "last": time.time_ns(),
+        }
+        if len(self.recent_variables) > 512:
+            oldest = sorted(
+                self.recent_variables,
+                key=lambda name: int(self.recent_variables[name].get("last", 0)),
+            )[:-512]
+            for name in oldest:
+                self.recent_variables.pop(name, None)
+        database.save_config(
+            self.RECENT_VARIABLES_KEY,
+            json.dumps(self.recent_variables, ensure_ascii=False, separators=(",", ":")),
+        )
+
+    @staticmethod
+    def _fuzzy_match(query, text):
+        """Match every whitespace-separated token as an ordered subsequence."""
+        folded_text = str(text).casefold()
+        for token in str(query).casefold().split():
+            position = 0
+            for character in token:
+                position = folded_text.find(character, position)
+                if position < 0:
+                    return False
+                position += 1
+        return True
+
+    def _rebuild_source_index(self):
+        self._sorted_symbol_names = sorted(self.elf_db.types, key=str.casefold)
+        self._source_counts = {}
+        for name in self._sorted_symbol_names:
+            source = self.elf_db.types[name].get("source_file", "") or "未知来源"
+            self._source_counts[source] = self._source_counts.get(source, 0) + 1
+
+        self._fill_source_tree()
+
+    def _fill_source_tree(self):
+        query = self.source_search.text().strip() if hasattr(self, "source_search") else ""
+        visible_sources = [
+            source for source in sorted(self._source_counts, key=str.casefold)
+            if not query or self._fuzzy_match(query, source)
+        ]
+
+        previous = self.current_source
+        self.source_tree.blockSignals(True)
+        self.source_tree.clear()
+        all_item = QTreeWidgetItem([f"全部文件  {len(self._sorted_symbol_names)}"])
+        all_item.setData(0, Qt.ItemDataRole.UserRole, "")
+        self.source_tree.addTopLevelItem(all_item)
+        selected_item = all_item
+        for source in visible_sources:
+            item = QTreeWidgetItem([f"{source}  {self._source_counts[source]}"])
+            item.setData(0, Qt.ItemDataRole.UserRole, source)
+            item.setToolTip(0, source)
+            self.source_tree.addTopLevelItem(item)
+            if source == previous:
+                selected_item = item
+        self.source_tree.setCurrentItem(selected_item)
+        self.current_source = selected_item.data(0, Qt.ItemDataRole.UserRole) or ""
+        self.source_tree.blockSignals(False)
+
+    def _source_changed(self):
+        item = self.source_tree.currentItem()
+        self.current_source = item.data(0, Qt.ItemDataRole.UserRole) if item else ""
+        self.current_source = self.current_source or ""
+        self._fill()
+
+    def _make_variable_item(self, display_name, path, root, info, address, source="", is_static=False):
+        storage = "static" if is_static else "global"
+        source_text = f"{storage} · {source}" if source else storage
+        item = QTreeWidgetItem([display_name, type_label(info), source_text, f"0x{int(address):08X}"])
+        item.setData(0, Qt.ItemDataRole.UserRole, root)
+        item.setData(0, Qt.ItemDataRole.UserRole + 1, path)
+        item.setToolTip(0, path)
+        if is_static:
+            item.setForeground(2, QColor("#ff9f0a"))
+        else:
+            item.setForeground(2, QColor("#30b0c7"))
+        if self._is_container(info):
+            placeholder = QTreeWidgetItem(["正在准备成员…"])
+            placeholder.setData(0, Qt.ItemDataRole.UserRole + 2, True)
+            item.addChild(placeholder)
+        return item
+
+    def _append_child(self, parent, display_name, path, root, info, address):
+        child = self._make_variable_item(display_name, path, root, info, address)
+        child.setText(2, "")
+        parent.addChild(child)
+
+    def _expand_item(self, item):
+        if item.childCount() != 1 or not item.child(0).data(0, Qt.ItemDataRole.UserRole + 2):
+            return
+        path = item.data(0, Qt.ItemDataRole.UserRole + 1)
+        root = item.data(0, Qt.ItemDataRole.UserRole)
+        try:
+            address, info = self.elf_db.resolve(path)
+        except Exception:
+            item.takeChildren()
+            return
+        item.takeChildren()
+        if info.get("kind") == "array":
+            element = info.get("element", {})
+            element_size = int(element.get("size", 0) or 0)
+            count = int(info.get("count", 0) or 0)
+            for index in range(min(count, self.MAX_PREVIEW_ARRAY_ELEMENTS)):
+                child_path = f"{path}[{index}]"
+                self._append_child(item, f"[{index}]", child_path, root, element, address + index * element_size)
+            if count > self.MAX_PREVIEW_ARRAY_ELEMENTS:
+                tail = QTreeWidgetItem([f"… 其余 {count - self.MAX_PREVIEW_ARRAY_ELEMENTS} 项未展开"])
+                tail.setDisabled(True)
+                item.addChild(tail)
+        elif info.get("kind") in ("struct", "union"):
+            for member in info.get("members", []):
+                child_path = f"{path}.{member['name']}"
+                self._append_child(
+                    item, member["name"], child_path, root, member["type"],
+                    address + int(member.get("offset", 0)),
+                )
+
     def _fill(self):
-        keyword = self.search.text().strip().lower(); self.tree.clear()
+        keyword = self.search.text().strip().casefold()
+        self.tree.clear()
         matched = 0
         self.tree.setUpdatesEnabled(False)
-        for name in self._sorted_symbol_names:
+        symbol_names = self._sorted_symbol_names
+        if not self.current_source:
+            symbol_names = sorted(
+                symbol_names,
+                key=lambda name: (
+                    -int(self.recent_variables.get(name, {}).get("last", 0)),
+                    -int(self.recent_variables.get(name, {}).get("count", 0)),
+                    name.casefold(),
+                ),
+            )
+        for name in symbol_names:
             info = self.elf_db.types.get(name)
-            storage = "static" if info and info.get("is_static") else "global"
-            source_file = info.get("source_file", "") if info else ""
-            storage_text = f"{storage} · {source_file}" if source_file else storage
-            if info is None or (keyword and keyword not in name.lower() and keyword not in type_label(info).lower() and keyword not in storage_text.lower()): continue
+            if info is None:
+                continue
+            storage = "static" if info.get("is_static") else "global"
+            source_file = info.get("source_file", "") or "未知来源"
+            if self.current_source and source_file != self.current_source:
+                continue
+            searchable = f"{name} {type_label(info)} {source_file} {storage}".casefold()
+            if keyword and not self._fuzzy_match(keyword, searchable):
+                continue
             matched += 1
-            if matched > self.MAX_VISIBLE_RESULTS: continue
-            item = QTreeWidgetItem([name, type_label(info), f"0x{self.elf_db.symbols[name]:08X}", storage_text]); item.setData(0, Qt.ItemDataRole.UserRole, name); self.tree.addTopLevelItem(item)
+            if matched > self.MAX_VISIBLE_RESULTS:
+                continue
+            item = self._make_variable_item(
+                name, name, name, info, self.elf_db.symbols[name], source_file, bool(info.get("is_static"))
+            )
+            self.tree.addTopLevelItem(item)
         self.tree.setUpdatesEnabled(True)
         shown = min(matched, self.MAX_VISIBLE_RESULTS)
-        result_text = f"，当前显示 {shown}/{matched} 个匹配项" if matched > self.MAX_VISIBLE_RESULTS else f"，当前显示 {shown} 个匹配项"
-        self.elf_status.setText(
-            f"ELF：{self.elf_db.path or '未加载'}  |  "
-            f"符号 {len(self.elf_db.symbols)} 个，DWARF 变量 {len(self.elf_db.types)} 个{result_text}"
-        )
+        result_text = f"{shown}/{matched}" if matched > self.MAX_VISIBLE_RESULTS else str(shown)
+        source_text = self.current_source or "全部文件"
+        self.elf_status.setText(f"{source_text}  ·  显示 {result_text} 个变量")
+
     def replace_elf_database(self, elf_db):
         self.elf_db = elf_db
-        self._sorted_symbol_names = sorted(self.elf_db.symbols, key=str.casefold)
+        self._rebuild_source_index()
         self._fill()
+
     def _show_add_menu(self, pos):
         item = self.tree.itemAt(pos)
         if item is None:
@@ -541,10 +782,14 @@ class ElfVariableDialog(QDialog):
         if selected in actions:
             self._accept_item(actions.index(selected), close_dialog=False)
 
-    def _accept_item(self, target_slot=-1, close_dialog=True):
+    def _accept_item(self, target_slot=-1, close_dialog=False):
         item = self.tree.currentItem()
-        if item:
-            self.symbol_selected_signal.emit(item.data(0, Qt.ItemDataRole.UserRole), int(target_slot))
+        root = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+        if root:
+            self._record_recent_variable(root)
+            self.symbol_selected_signal.emit(root, int(target_slot))
+            target_text = "当前调试窗口" if int(target_slot) < 0 else ("主调试窗口" if int(target_slot) == 0 else f"调试窗口 {int(target_slot) + 1}")
+            self.elf_status.setText(f"✓  {root} 已添加到{target_text}")
             if close_dialog:
                 self.close()
 
@@ -1175,6 +1420,8 @@ class AdvanceCParserDialog(QDialog):
 
 
 class MCUStudioWindow(QMainWindow):
+    WORKSPACE_STATE_KEY = "workspace_state_v1"
+
     def __init__(self, config, db):
         super().__init__()
         self.config = config
@@ -1246,15 +1493,22 @@ class MCUStudioWindow(QMainWindow):
             '青绿', '靛蓝', '棕色', '粉色',
         ]
         self.curve_colors = {}
-        self.hover_last_update = [0.0, 0.0, 0.0]
         self.hover_last_point = [None, None, None]
         self.canvas_fixed_ranges = [None, None, None]
         self.tcl_socket = None
         self.heartbeat_state = False
+        self.workspace_restore_in_progress = True
+        self.pending_workspace_splitter_sizes = None
 
         self.init_global_link_backend()
         self.load_elf_symbols()  
         self.init_ui()
+        self.workspace_save_timer = QTimer(self)
+        self.workspace_save_timer.setSingleShot(True)
+        self.workspace_save_timer.setInterval(250)
+        self.workspace_save_timer.timeout.connect(self.save_workspace_state)
+        self.main_splitter.splitterMoved.connect(lambda *_: self.schedule_workspace_save())
+        self.plot_splitter.splitterMoved.connect(lambda *_: self.schedule_workspace_save())
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
@@ -1274,6 +1528,9 @@ class MCUStudioWindow(QMainWindow):
         self.timer_heartbeat.start(300)
 
         self.load_history_from_db()
+        self.restore_workspace_state()
+        self.workspace_restore_in_progress = False
+        self.schedule_workspace_save()
 
         # Watch the selected ELF itself (not its project directory).  Requiring
         # the same changed signature twice avoids parsing while the linker is
@@ -1348,11 +1605,6 @@ class MCUStudioWindow(QMainWindow):
             self.elf_db = refreshed
             self.symbol_cache = dict(refreshed.symbols)
 
-            # Symbols removed by the new firmware must not keep stale addresses.
-            for path, _v_type, _offset, base_var, tab_idx in list(self.db.get_all_vars()):
-                if not base_var.startswith(("0x", "0X")) and base_var not in self.symbol_cache:
-                    self.db.delete_var(path, tab_idx)
-
             for tree in self.debug_trees.values():
                 tree.clear()
             self.load_history_from_db()
@@ -1363,12 +1615,11 @@ class MCUStudioWindow(QMainWindow):
                 row = current_rows.get(path)
                 if row is not None:
                     _name, v_type, offset, base_var, _tab_idx = row
-                    base_address = (int(base_var, 16) if base_var.startswith(("0x", "0X"))
-                                    else self.symbol_cache.get(base_var))
-                    if base_address is not None:
+                    absolute_address = self.resolve_saved_variable_address(path, offset, base_var)
+                    if absolute_address is not None:
                         valid_paths.append(path)
                         valid_types.append(v_type)
-                        valid_addrs.append(hex(base_address + offset))
+                        valid_addrs.append(hex(absolute_address))
                         continue
                 for active in self.plot_active_paths:
                     while path in active:
@@ -1389,6 +1640,7 @@ class MCUStudioWindow(QMainWindow):
                 except RuntimeError: self.adv_parse_dialog = None
             self.refresh_ui_channel_bar()
             self.reset_canvas_adapt_ranges()
+            self.schedule_workspace_save()
             self.elf_last_signature = self._elf_file_signature()
             self.elf_pending_signature = None
             self.elf_pending_stable_ticks = 0
@@ -1436,6 +1688,16 @@ class MCUStudioWindow(QMainWindow):
         if path.startswith(("0x", "0X")): return None
         try: return self.elf_db.resolve(path)[1]
         except Exception: return None
+
+    def resolve_saved_variable_address(self, path, offset, base_var):
+        """Resolve a saved watch against the current ELF, never a stale cached address."""
+        if base_var.startswith(("0x", "0X")):
+            return int(base_var, 16) + int(offset)
+        try:
+            return int(self.elf_db.resolve(path)[0])
+        except (KeyError, ValueError, IndexError):
+            base_address = self.symbol_cache.get(base_var)
+            return None if base_address is None else int(base_address) + int(offset)
 
     @staticmethod
     def decode_value(data, info):
@@ -1584,14 +1846,14 @@ class MCUStudioWindow(QMainWindow):
             "自定义", "500 Hz", "1 kHz", "2 kHz", "4 kHz", "8 kHz"
         ])
         self.wave_hz_combo.setMinimumWidth(105)
-        self.wave_hz_combo.currentIndexChanged.connect(self.restart_sampling_thread)
+        self.wave_hz_combo.currentIndexChanged.connect(self._sampling_setting_changed)
         
         self.custom_hz_edit = QLineEdit("30")
         self.custom_hz_edit.setFixedWidth(62)
         self.custom_hz_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.custom_hz_edit.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
         self.custom_hz_edit.setValidator(QIntValidator(1, 8000, self))
-        self.custom_hz_edit.editingFinished.connect(self.restart_sampling_thread)
+        self.custom_hz_edit.editingFinished.connect(self._sampling_setting_changed)
         
         self.btn_freeze = QPushButton("暂停")
         self.btn_freeze.setProperty("plotTool", True)
@@ -1707,7 +1969,7 @@ class MCUStudioWindow(QMainWindow):
         self.tab_widget.setMovable(False)
         self.tab_widget.tabBarDoubleClicked.connect(self.detach_debug_tab)
         detachable_tab_bar.detach_requested.connect(self.detach_debug_tab)
-        self.tab_widget.currentChanged.connect(lambda: self.restart_sampling_thread())
+        self.tab_widget.currentChanged.connect(lambda: (self.restart_sampling_thread(), self.schedule_workspace_save()))
 
         self.create_new_debug_tab("主调试窗口")
         self.create_new_debug_tab("调试窗口 2")
@@ -1724,6 +1986,7 @@ class MCUStudioWindow(QMainWindow):
         self.h_lines = []
         self.hover_dots = []
         self.hover_labels = []
+        self.mouse_move_proxies = []
         self.measurement_lines = []
         self.measurement_dots = []
 
@@ -1760,7 +2023,13 @@ class MCUStudioWindow(QMainWindow):
             hover_label.setVisible(False)
             pw.addItem(hover_label)
             self.hover_labels.append(hover_label)
-            pw.scene().sigMouseMoved.connect(lambda pos, idx=i: self.handle_plot_mouse_move(pos, idx))
+            mouse_proxy = pg.SignalProxy(
+                pw.scene().sigMouseMoved,
+                delay=0.0,
+                rateLimit=60,
+                slot=lambda event, idx=i: self.handle_plot_mouse_move(event[0], idx),
+            )
+            self.mouse_move_proxies.append(mouse_proxy)
 
             measure_line = pg.PlotDataItem(
                 pen=pg.mkPen(self.theme_colors['measurement'], width=2, style=Qt.PenStyle.DashLine)
@@ -1799,11 +2068,6 @@ class MCUStudioWindow(QMainWindow):
         plot_toolbar.addSpacing(12)
         plot_toolbar.addWidget(plot_title)
         plot_toolbar.addStretch()
-        self.btn_export_csv = QPushButton("导出 CSV")
-        self.btn_export_csv.setProperty("plotTool", True)
-        self.btn_export_csv.setToolTip("选择监视变量，导出当前缓存的采样数据")
-        self.btn_export_csv.clicked.connect(self.export_variable_csv)
-        plot_toolbar.addWidget(self.btn_export_csv)
         plot_toolbar.addWidget(self.btn_freeze)
         plot_toolbar.addWidget(self.btn_canvas_adapt)
         plot_toolbar.addWidget(self.btn_measure)
@@ -2520,11 +2784,125 @@ class MCUStudioWindow(QMainWindow):
         elif layout_id == 3:
             h = container_height // 3
             self.plot_splitter.setSizes([h, h, h])
+        self.schedule_workspace_save()
         QTimer.singleShot(0, self._reset_layout_switching_flag)
 
     def _reset_layout_switching_flag(self):
         self.layout_switching = False
         self.update_plot_canvas()
+
+    def _sampling_setting_changed(self, *_args):
+        self.schedule_workspace_save()
+        self.restart_sampling_thread()
+
+    def schedule_workspace_save(self):
+        if self.workspace_restore_in_progress or not hasattr(self, "workspace_save_timer"):
+            return
+        self.workspace_save_timer.start()
+
+    def save_workspace_state(self):
+        if self.workspace_restore_in_progress or not hasattr(self, "main_splitter"):
+            return
+        state = {
+            "plot_paths": [list(paths) for paths in self.plot_active_paths],
+            "main_splitter": self.main_splitter.sizes(),
+            "plot_splitter": self.plot_splitter.sizes(),
+            "wave_hz_index": self.wave_hz_combo.currentIndex(),
+            "custom_hz": self.custom_hz_edit.text().strip(),
+            "current_debug_tab": self.tab_widget.currentIndex(),
+            "window_size": [self.width(), self.height()],
+        }
+        self.db.save_config(
+            self.WORKSPACE_STATE_KEY,
+            json.dumps(state, ensure_ascii=False, separators=(",", ":")),
+        )
+
+    @staticmethod
+    def _valid_splitter_sizes(value, expected):
+        if not isinstance(value, list) or len(value) != expected:
+            return None
+        try:
+            sizes = [max(0, int(item)) for item in value]
+        except (TypeError, ValueError):
+            return None
+        return sizes if any(sizes) else None
+
+    def restore_workspace_state(self):
+        try:
+            state = json.loads(self.db.get_config(self.WORKSPACE_STATE_KEY, "{}"))
+        except (TypeError, ValueError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+
+        hz_index = state.get("wave_hz_index")
+        if isinstance(hz_index, int) and 0 <= hz_index < self.wave_hz_combo.count():
+            self.wave_hz_combo.blockSignals(True)
+            self.wave_hz_combo.setCurrentIndex(hz_index)
+            self.wave_hz_combo.blockSignals(False)
+        custom_hz = str(state.get("custom_hz", "30"))
+        if custom_hz.isdigit() and 1 <= int(custom_hz) <= 8000:
+            self.custom_hz_edit.setText(custom_hz)
+        self.custom_hz_edit.setEnabled(self.wave_hz_combo.currentIndex() == 0)
+
+        tab_index = state.get("current_debug_tab")
+        if isinstance(tab_index, int) and 0 <= tab_index < self.tab_widget.count():
+            self.tab_widget.blockSignals(True)
+            self.tab_widget.setCurrentIndex(tab_index)
+            self.tab_widget.blockSignals(False)
+
+        window_size = state.get("window_size")
+        if isinstance(window_size, list) and len(window_size) == 2:
+            try:
+                width, height = int(window_size[0]), int(window_size[1])
+                if width >= 900 and height >= 600:
+                    self.resize(width, height)
+            except (TypeError, ValueError):
+                pass
+
+        main_sizes = self._valid_splitter_sizes(state.get("main_splitter"), 2)
+        plot_sizes = self._valid_splitter_sizes(state.get("plot_splitter"), 3)
+        if main_sizes:
+            self.main_splitter.setSizes(main_sizes)
+        if plot_sizes:
+            self.plot_splitter.setSizes(plot_sizes)
+
+        db_rows = {row[0]: row for row in self.db.get_all_vars()}
+        restored_paths = state.get("plot_paths", [[], [], []])
+        if not isinstance(restored_paths, list):
+            restored_paths = [[], [], []]
+        self.plot_active_paths = [[], [], []]
+        self.ch_paths = []
+        self.ch_types = []
+        self.ch_addrs = []
+        self.ch_buffers = []
+        self.ch_time_stamps = []
+        for plot_idx in range(3):
+            paths = restored_paths[plot_idx] if plot_idx < len(restored_paths) else []
+            if not isinstance(paths, list):
+                continue
+            for path in paths:
+                if not isinstance(path, str) or path in self.plot_active_paths[plot_idx]:
+                    continue
+                row = db_rows.get(path)
+                if row is None:
+                    continue
+                _name, var_type, offset, base_var, _tab_idx = row
+                address = self.resolve_saved_variable_address(path, offset, base_var)
+                if address is None:
+                    continue
+                self.plot_active_paths[plot_idx].append(path)
+                if path not in self.ch_paths:
+                    self.ch_paths.append(path)
+                    self.ch_types.append(var_type)
+                    self.ch_addrs.append(hex(address))
+                    self.ch_buffers.append([])
+                    self.ch_time_stamps.append([])
+                self._curve_color(path)
+        self.refresh_ui_channel_bar()
+        self.reset_canvas_adapt_ranges()
+        if self.ch_paths:
+            self.restart_sampling_thread()
 
     def restore_layout_and_type_configs(self):
         try:
@@ -2538,13 +2916,7 @@ class MCUStudioWindow(QMainWindow):
         except: pass
 
     def load_history_from_db(self):
-        # Refresh saved variable layouts from this ELF so stale source-derived
-        # offsets in an existing history database cannot be reused.
-        old_rows = self.db.get_all_vars()
-        roots = {row[3] for row in old_rows if row[3] in self.elf_db.types}
-        for root in roots:
-            for tab_idx in {row[4] for row in old_rows if row[3] == root}:
-                self.db.replace_root_vars(root, tab_idx, self.elf_db.flatten(root))
+        self.synchronize_saved_variables_with_elf()
         db_vars = self.db.get_all_vars()
         for row in db_vars:
             path, v_type, offset, base_var = row[0], row[1], row[2], row[3]
@@ -2556,7 +2928,23 @@ class MCUStudioWindow(QMainWindow):
             t_idx = row[4] if len(row) > 4 else 0
             if '.' in path or '[' in path: self.inject_var_to_tree_ui(path, v_type, t_idx)
 
-    def export_variable_csv(self):
+    def synchronize_saved_variables_with_elf(self):
+        """Rebuild every named watch from the active ELF for all debug windows."""
+        old_rows = self.db.get_all_vars()
+        named_roots = {
+            (row[3], int(row[4]))
+            for row in old_rows
+            if row[3] and not row[3].startswith(("0x", "0X"))
+        }
+        for root, tab_idx in named_roots:
+            if root in self.elf_db.types:
+                self.db.replace_root_vars(root, tab_idx, self.elf_db.flatten(root))
+            elif root not in self.symbol_cache:
+                # The name no longer exists in the current firmware. Removing
+                # the complete root prevents an old address from being reused.
+                self.db.replace_root_vars(root, tab_idx, [])
+
+    def export_variable_csv(self, preferred_path=None):
         # Copy paired samples under the existing lock; dialogs and disk I/O never hold it.
         with QMutexLocker(self.buffer_mutex):
             snapshots = [
@@ -2581,6 +2969,13 @@ class MCUStudioWindow(QMainWindow):
         selector = QComboBox()
         for channel, path, rows in snapshots:
             selector.addItem(f"CH{channel + 1} · {path}")
+        if preferred_path:
+            preferred_index = next(
+                (index for index, (_channel, path, _rows) in enumerate(snapshots) if path == preferred_path),
+                -1,
+            )
+            if preferred_index >= 0:
+                selector.setCurrentIndex(preferred_index)
         form.addRow("选择变量", selector)
         details = QLabel()
         form.addRow("数据范围", details)
@@ -2746,28 +3141,32 @@ class MCUStudioWindow(QMainWindow):
         if not self.is_frozen or self.layout_switching: return
         if self.measurement_mode:
             return
-        now = time.monotonic()
-        if now - self.hover_last_update[plot_idx] < 0.033:
-            return
-        self.hover_last_update[plot_idx] = now
         pw = self.plot_widgets[plot_idx]
         if pw.isHidden() or not pw.isVisible() or pw.width() <= 20 or pw.height() <= 20: return
 
         try:
             if not pw.getPlotItem().scene(): return
+            view_box = pw.getViewBox()
+            if not view_box.sceneBoundingRect().contains(pos):
+                return
+            mouse_point = view_box.mapSceneToView(pos)
+            if self.v_lines[plot_idx]:
+                self.v_lines[plot_idx].setPos(mouse_point.x())
+                self.v_lines[plot_idx].setVisible(True)
+            if self.h_lines[plot_idx]:
+                self.h_lines[plot_idx].setPos(mouse_point.y())
+                self.h_lines[plot_idx].setVisible(True)
+
             nearest = self._nearest_visible_sample(plot_idx, pos)
             if nearest is None:
+                self.hover_dots[plot_idx].setVisible(False)
+                self.hover_labels[plot_idx].setVisible(False)
                 return
             exact_x, exact_y, _display_channel, path = nearest
             point_key = (path, exact_x, exact_y)
             if point_key == self.hover_last_point[plot_idx]:
                 return
             self.hover_last_point[plot_idx] = point_key
-
-            if self.v_lines[plot_idx]: self.v_lines[plot_idx].setPos(exact_x)
-            if self.h_lines[plot_idx]: self.h_lines[plot_idx].setPos(exact_y)
-            if self.v_lines[plot_idx]: self.v_lines[plot_idx].setVisible(True)
-            if self.h_lines[plot_idx]: self.h_lines[plot_idx].setVisible(True)
 
             if self.hover_dots[plot_idx]:
                 self.hover_dots[plot_idx].setData(
@@ -2845,6 +3244,8 @@ class MCUStudioWindow(QMainWindow):
         adapt_action = menu.addAction("自动适应当前波形")
         clear_action = menu.addAction("清除测量标记")
         clear_action.setEnabled(any(self.measurement_points))
+        menu.addSeparator()
+        export_action = menu.addAction("导出采样 CSV…")
         chosen = menu.exec(pw.mapToGlobal(pos))
         if chosen == measure_action:
             self.toggle_measurement_mode(measure_action.isChecked())
@@ -2852,6 +3253,8 @@ class MCUStudioWindow(QMainWindow):
             self.start_canvas_auto_adapt()
         elif chosen == clear_action:
             self.clear_measurements()
+        elif chosen == export_action:
+            self.export_variable_csv()
 
     def set_plot_channel_visible(self, path, plot_idx, visible):
         active_paths = self.plot_active_paths[plot_idx]
@@ -2863,6 +3266,7 @@ class MCUStudioWindow(QMainWindow):
             self._remove_sampled_path(path)
         self.clear_measurements()
         self.refresh_ui_channel_bar()
+        self.schedule_workspace_save()
         self.restart_sampling_thread()
 
     def _remove_sampled_path(self, path):
@@ -2971,6 +3375,7 @@ class MCUStudioWindow(QMainWindow):
         menu.setStyleSheet(self.popup_menu_style)
         is_container = "{结构体/数组}" in item.text(2)
         channel_actions = []
+        export_action = None
         if not is_container:
             channel_menu = menu.addMenu("添加到波形通道")
             for channel_idx, title in enumerate(("CH1", "CH2", "CH3")):
@@ -2981,6 +3386,9 @@ class MCUStudioWindow(QMainWindow):
             color_menu = menu.addMenu("曲线颜色")
             color_menu.setIcon(self._color_icon(self._curve_color(path)))
             self._populate_curve_color_menu(color_menu, path)
+            menu.addSeparator()
+            export_action = menu.addAction("导出该变量 CSV…")
+            export_action.setEnabled(path in self.ch_paths)
             menu.addSeparator()
 
         m_del = menu.addAction("删除整组变量及其子成员")
@@ -2996,6 +3404,8 @@ class MCUStudioWindow(QMainWindow):
             root_item = item
             while root_item.parent(): root_item = root_item.parent()
             self.remove_variable_root(root_item, tree)
+        elif export_action is not None and act == export_action:
+            self.export_variable_csv(path)
 
     def bind_tree_item_to_channel(self, plot_idx, item):
         path = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
@@ -3003,13 +3413,8 @@ class MCUStudioWindow(QMainWindow):
         all_db_vars = {x[0]: (x[2], x[3]) for x in self.db.get_all_vars()}
         if path not in all_db_vars: return
         offset, base_var = all_db_vars[path]
-        
-        if base_var.startswith("0x") or base_var.startswith("0X"):
-            absolute_address = int(base_var, 16) + offset
-        else:
-            base_addr = self.symbol_cache.get(base_var)
-            if base_addr is None: return
-            absolute_address = base_addr + offset
+        absolute_address = self.resolve_saved_variable_address(path, offset, base_var)
+        if absolute_address is None: return
         
         locker = QMutexLocker(self.buffer_mutex)
         if path in self.ch_paths:
@@ -3030,6 +3435,7 @@ class MCUStudioWindow(QMainWindow):
         self.clear_measurements()
         self.refresh_ui_channel_bar()
         self.reset_canvas_adapt_ranges()
+        self.schedule_workspace_save()
         self.restart_sampling_thread()
 
     def unbind_channel(self, ch_idx, restart=True):
@@ -3052,6 +3458,7 @@ class MCUStudioWindow(QMainWindow):
         self.clear_measurements()
         self.refresh_ui_channel_bar()
         self.reset_canvas_adapt_ranges()
+        self.schedule_workspace_save()
         if restart:
             self.restart_sampling_thread()
 
@@ -3155,13 +3562,9 @@ class MCUStudioWindow(QMainWindow):
         all_db_vars = {x[0]: (x[2], x[3]) for x in self.db.get_all_vars()}
         if path not in all_db_vars: return
         offset, base_var = all_db_vars[path]
-        
-        if base_var.startswith("0x") or base_var.startswith("0X"):
-            addr_hex = hex(int(base_var, 16) + offset)
-        else:
-            base_addr = self.symbol_cache.get(base_var)
-            if base_addr is None: return
-            addr_hex = hex(base_addr + offset)
+        absolute_address = self.resolve_saved_variable_address(path, offset, base_var)
+        if absolute_address is None: return
+        addr_hex = hex(absolute_address)
             
         try:
             type_info = self.type_info_for_path(path)
@@ -3342,13 +3745,9 @@ class MCUStudioWindow(QMainWindow):
             if path not in tab_vars:
                 return
             offset, base_var, _v_type = tab_vars[path]
-            if base_var.startswith(("0x", "0X")):
-                absolute_address = int(base_var, 16) + offset
-            else:
-                base_addr = self.symbol_cache.get(base_var)
-                if base_addr is None:
-                    return
-                absolute_address = base_addr + offset
+            absolute_address = self.resolve_saved_variable_address(path, offset, base_var)
+            if absolute_address is None:
+                return
 
             type_info = self.type_info_for_path(path)
             size = scalar_size(type_info) if type_info is not None else 0
@@ -3488,6 +3887,7 @@ class MCUStudioWindow(QMainWindow):
             QMessageBox.information(self, "正在重连", "通信后端正在后台重连，请等待完成后再关闭程序。")
             event.ignore()
             return
+        self.save_workspace_state()
         if hasattr(self, 'elf_watch_timer'): self.elf_watch_timer.stop()
         for window in list(getattr(self, "detached_debug_windows", {}).values()):
             window._reattaching = True

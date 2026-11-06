@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import compileall
+import json
 import os
 from pathlib import Path
 import socket
@@ -131,6 +132,76 @@ def validate_imports_and_elf_helpers() -> None:
     dialog.tree.setCurrentItem(dialog.tree.topLevelItem(0))
     dialog._accept_item(2, close_dialog=False)
     check(selected_targets and selected_targets[-1][1] == 2, "ELF browser can target any debug window")
+
+    browser_database = core.ElfDatabase()
+    browser_database.path = "browser.elf"
+    browser_database.symbols = {"motor": 0x20000100, "temperature": 0x20000200}
+    browser_database.types = {
+        "motor": {
+            "kind": "struct", "name": "MotorState", "size": 8,
+            "source_file": "motor.c", "is_static": False,
+            "members": [
+                {"name": "speed", "offset": 0, "type": scalar},
+                {"name": "current", "offset": 4, "type": scalar},
+            ],
+        },
+        "temperature": dict(scalar, source_file="sensor.c", is_static=True),
+    }
+    dialog.replace_elf_database(browser_database)
+    check(dialog.source_tree.topLevelItemCount() == 3, "ELF browser groups variables by source file")
+    dialog.search.setText("motors")
+    dialog._fill()
+    check(
+        dialog.tree.topLevelItemCount() == 1 and dialog.tree.topLevelItem(0).text(0) == "motor",
+        "ELF browser variable search supports fuzzy subsequence matching",
+    )
+    dialog.search.clear()
+    dialog._fill()
+    dialog.source_search.setText("mtrc")
+    dialog._fill_source_tree()
+    check(
+        dialog.source_tree.topLevelItemCount() == 2
+        and dialog.source_tree.topLevelItem(1).data(0, Qt.ItemDataRole.UserRole) == "motor.c",
+        "ELF browser source-file search supports fuzzy filtering",
+    )
+    dialog.source_search.clear()
+    dialog._fill_source_tree()
+    motor_source = next(
+        dialog.source_tree.topLevelItem(index)
+        for index in range(dialog.source_tree.topLevelItemCount())
+        if dialog.source_tree.topLevelItem(index).data(0, Qt.ItemDataRole.UserRole) == "motor.c"
+    )
+    dialog.source_tree.setCurrentItem(motor_source)
+    application.processEvents()
+    motor_item = dialog.tree.topLevelItem(0)
+    motor_item.setExpanded(True)
+    application.processEvents()
+    check(
+        dialog.tree.topLevelItemCount() == 1
+        and motor_item.childCount() == 2
+        and motor_item.child(1).text(0) == "current"
+        and motor_item.child(1).text(3) == "0x20000104",
+        "ELF browser filters by source and lazily expands structured variables",
+    )
+    before_adds = len(selected_targets)
+    dialog.tree.setCurrentItem(motor_item.child(0))
+    dialog._accept_item(0)
+    dialog._accept_item(0)
+    check(
+        len(selected_targets) == before_adds + 2
+        and selected_targets[-1] == ("motor", 0),
+        "ELF browser supports continuous adds without closing",
+    )
+    dialog.source_tree.setCurrentItem(dialog.source_tree.topLevelItem(0))
+    dialog.recent_variables = {
+        "temperature": {"count": 2, "last": 200},
+        "motor": {"count": 8, "last": 100},
+    }
+    dialog._fill()
+    check(
+        dialog.tree.topLevelItem(0).text(0) == "temperature",
+        "ELF browser ranks all-file results by most recent use",
+    )
     dialog.close()
     application.processEvents()
     with tempfile.TemporaryDirectory() as directory, patch.object(sys, "argv", [str(Path(directory) / "main.py")]):
@@ -160,6 +231,39 @@ def validate_imports_and_elf_helpers() -> None:
             studio = ui.MCUStudioWindow(config, test_database)
         studio.show()
         application.processEvents()
+
+        old_state = core.ElfDatabase()
+        old_state.symbols = {"state": 0x20000000}
+        old_state.types = {
+            "state": {
+                "kind": "struct", "name": "State", "size": 4,
+                "members": [{"name": "value", "offset": 0, "type": scalar}],
+            }
+        }
+        test_database.replace_root_vars("state", 0, old_state.flatten("state"))
+        new_state = core.ElfDatabase()
+        new_state.symbols = {"state": 0x20001000}
+        new_state.types = {
+            "state": {
+                "kind": "struct", "name": "State", "size": 12,
+                "members": [{"name": "value", "offset": 8, "type": scalar}],
+            }
+        }
+        studio.elf_db = new_state
+        studio.symbol_cache = dict(new_state.symbols)
+        studio.synchronize_saved_variables_with_elf()
+        state_row = test_database.get_var_map(0)["state.value"]
+        check(
+            state_row[0] == 8
+            and studio.resolve_saved_variable_address("state.value", 0, "state") == 0x20001008,
+            "saved watches follow current ELF names, addresses and member offsets",
+        )
+        new_state.symbols = {}
+        new_state.types = {}
+        studio.symbol_cache = {}
+        studio.synchronize_saved_variables_with_elf()
+        check(not test_database.get_var_map(0), "renamed or removed ELF roots invalidate saved watches")
+
         check(studio.tab_widget.count() == 3, "three fixed debug windows are created")
         check(studio.debug_trees[0].headerItem().text(0) == "全局变量", "debug variable column uses the compact title")
         check(
@@ -261,6 +365,28 @@ def validate_imports_and_elf_helpers() -> None:
             studio._curve_color("multi_a") == "#ff453a"
             and studio.db.get_config("curve_color:multi_a") == "#ff453a",
             "curve colors can be changed and persisted per variable",
+        )
+        studio.main_splitter.setSizes([520, 900])
+        studio.plot_splitter.setSizes([300, 200, 100])
+        studio.wave_hz_combo.blockSignals(True)
+        studio.wave_hz_combo.setCurrentIndex(2)
+        studio.wave_hz_combo.blockSignals(False)
+        studio.save_workspace_state()
+        saved_workspace = json.loads(studio.db.get_config(studio.WORKSPACE_STATE_KEY))
+        studio.ch_paths = []
+        studio.ch_types = []
+        studio.ch_addrs = []
+        studio.ch_buffers = []
+        studio.ch_time_stamps = []
+        studio.plot_active_paths = [[], [], []]
+        with patch.object(studio, "restart_sampling_thread"):
+            studio.restore_workspace_state()
+        check(
+            studio.plot_active_paths[0] == ["multi_a", "multi_b"]
+            and studio.ch_paths == ["multi_a", "multi_b"]
+            and saved_workspace["plot_paths"][0] == ["multi_a", "multi_b"]
+            and studio.wave_hz_combo.currentIndex() == 2,
+            "workspace restores waveform bindings, layout sizes and sampling settings",
         )
         studio.db.delete_var("multi_a", 0)
         studio.db.delete_var("multi_b", 0)

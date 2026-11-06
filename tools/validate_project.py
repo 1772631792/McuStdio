@@ -60,7 +60,11 @@ def validate_imports_and_elf_helpers() -> None:
         ui.QMessageBox is ui.SilentMessageBox,
         "application dialogs use the silent message box implementation",
     )
-    check(workers.ElfFlashWorker.__name__ == "ElfFlashWorker", "worker module imports")
+    check(
+        workers.ElfFlashWorker.__name__ == "ElfFlashWorker"
+        and workers.ElfParseWorker.__name__ == "ElfParseWorker",
+        "flash and background ELF workers import",
+    )
     check(workers.OpenOcdFlashWorker.__name__ == "OpenOcdFlashWorker", "OpenOCD flash worker imports")
     check(
         workers.LowSpeedReadWorker.__name__ == "LowSpeedReadWorker"
@@ -480,10 +484,36 @@ def validate_imports_and_elf_helpers() -> None:
         studio.ch_time_stamps = [[0.0, 1000.0, 2000.0]]
         studio.ch_buffers = [[1.0, 3.0, 2.0]]
         studio.start_canvas_auto_adapt()
+        studio.update_plot_canvas()
         check(
             studio.canvas_fixed_ranges[0] is not None
             and studio.lbl_status_text.text().startswith("已适配"),
             "waveform fit uses buffered data immediately without a delay timer",
+        )
+        check(
+            studio.plot_legends[0].isVisible()
+            and len(studio.plot_legends[0].items) == 1,
+            "active waveform variables appear in a compact in-plot legend",
+        )
+        studio._place_plot_legend_away_from_data(
+            0,
+            [index / 10.0 for index in range(101)],
+            [5.0] * 101,
+            (0.0, 10.0),
+            (0.0, 5.0),
+        )
+        check(
+            studio.plot_legend_corners[0] == "bottom-left",
+            "waveform fit moves the legend away from occupied curve corners",
+        )
+        fitted_y_range = list(studio.plot_widgets[0].getViewBox().viewRange()[1])
+        studio.ch_time_stamps[0].append(3000.0)
+        studio.ch_buffers[0].append(100.0)
+        studio.update_plot_canvas()
+        current_y_range = studio.plot_widgets[0].getViewBox().viewRange()[1]
+        check(
+            all(abs(current_y_range[index] - fitted_y_range[index]) < 1e-9 for index in (0, 1)),
+            "one-shot waveform fit preserves the chosen Y range as new data arrives",
         )
         plot_x, plot_y = studio._display_plot_data(
             list(range(40_000)),

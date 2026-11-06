@@ -12,6 +12,7 @@ import time
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from .core import (
+    ElfDatabase,
     connect_openocd_tcl,
     decode_openocd_memory_response,
     decode_sample_value,
@@ -27,6 +28,24 @@ try:
     import pylink
 except ImportError:
     pylink = None
+
+
+class ElfParseWorker(QThread):
+    """Parse ELF/DWARF away from the GUI thread."""
+
+    result_ready = pyqtSignal(bool, object, str)
+
+    def __init__(self, elf_path, parent=None):
+        super().__init__(parent)
+        self.elf_path = elf_path
+
+    def run(self):
+        try:
+            database = ElfDatabase()
+            database.load(self.elf_path)
+            self.result_ready.emit(True, database, "")
+        except Exception as exc:
+            self.result_ready.emit(False, None, str(exc))
 
 
 def build_contiguous_read_blocks(channels, max_bytes=256):

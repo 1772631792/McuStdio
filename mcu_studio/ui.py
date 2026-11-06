@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QRadioButton, QButtonGroup, QTabWidget, QFrame, QTabBar,
                              QStyle, QStyleOptionButton, QProgressBar)
 from PyQt6.QtCore import (QTimer, Qt, QEvent, pyqtSignal, QVariantAnimation, QMutex,
-                          QMutexLocker, QPointF, QRectF, QThread)
+                          QMutexLocker, QPointF, QRectF, QThread, QEventLoop)
 from PyQt6.QtGui import (QFont, QKeyEvent, QIntValidator, QDoubleValidator, QColor,
                          QAction, QPen, QIcon, QPainter, QPalette, QPainterPath,
                          QPixmap, QRegion)
@@ -42,7 +42,7 @@ from .core import (
     type_label,
     validate_openocd_config,
 )
-from .workers import (BackendCloseWorker, BackendReconnectWorker, ElfFlashWorker,
+from .workers import (BackendCloseWorker, BackendReconnectWorker, ElfFlashWorker, ElfParseWorker,
                       HighSpeedSamplingWorker, LowSpeedReadWorker, OpenOcdFlashWorker)
 
 pg.setConfigOptions(useOpenGL=False, antialias=True)
@@ -1495,13 +1495,14 @@ class MCUStudioWindow(QMainWindow):
         self.curve_colors = {}
         self.hover_last_point = [None, None, None]
         self.canvas_fixed_ranges = [None, None, None]
+        self.plot_legend_corners = ["top-left", "top-left", "top-left"]
         self.tcl_socket = None
         self.heartbeat_state = False
         self.workspace_restore_in_progress = True
         self.pending_workspace_splitter_sizes = None
+        self.initial_workspace_loaded = False
 
         self.init_global_link_backend()
-        self.load_elf_symbols()  
         self.init_ui()
         self.workspace_save_timer = QTimer(self)
         self.workspace_save_timer.setSingleShot(True)
@@ -1527,11 +1528,6 @@ class MCUStudioWindow(QMainWindow):
         self.timer_heartbeat.timeout.connect(self.update_hardware_heartbeat)
         self.timer_heartbeat.start(300)
 
-        self.load_history_from_db()
-        self.restore_workspace_state()
-        self.workspace_restore_in_progress = False
-        self.schedule_workspace_save()
-
         # Watch the selected ELF itself (not its project directory).  Requiring
         # the same changed signature twice avoids parsing while the linker is
         # still replacing/writing the file.
@@ -1541,6 +1537,12 @@ class MCUStudioWindow(QMainWindow):
         self.elf_watch_timer = QTimer(self)
         self.elf_watch_timer.timeout.connect(self.check_elf_file_changed)
         self.elf_watch_timer.start(1000)
+
+        elf_path = os.path.abspath(self.config.elf_path) if self.config.elf_path else ""
+        if os.path.isfile(elf_path):
+            QTimer.singleShot(0, lambda path=elf_path: self._start_initial_elf_load(path))
+        else:
+            self._finish_initial_workspace_load(synchronize_elf=False)
 
     def init_global_link_backend(self):
         if self.backend_suspended:
@@ -1582,25 +1584,90 @@ class MCUStudioWindow(QMainWindow):
         except Exception as e:
             print(f"❌ ELF 符号表加载异常: {e}")
 
+    def _start_initial_elf_load(self, elf_path):
+        """Show the workspace first, then parse the initial ELF asynchronously."""
+        if self.elf_reload_in_progress or self.initial_workspace_loaded:
+            return
+        self.elf_reload_in_progress = True
+        self.lbl_status_text.setText("正在后台解析 ELF…")
+        self.btn_elf_browser.setEnabled(False)
+        result = {"ok": False, "database": None, "error": ""}
+        worker = ElfParseWorker(elf_path, self)
+        self.elf_parse_worker = worker
+
+        def receive_result(ok, database, error):
+            result.update(ok=bool(ok), database=database, error=str(error or ""))
+
+        def finish_initial_parse():
+            self.elf_reload_in_progress = False
+            self.btn_elf_browser.setEnabled(True)
+            self.elf_parse_worker = None
+            worker.deleteLater()
+            if result["ok"] and result["database"] is not None:
+                self.elf_db = result["database"]
+                self.symbol_cache = dict(self.elf_db.symbols)
+                print(f"ELF loaded: {len(self.symbol_cache)} symbols, {len(self.elf_db.types)} DWARF variables")
+                self.lbl_status_text.setText("ELF 已加载")
+                self._finish_initial_workspace_load(synchronize_elf=True)
+            else:
+                print(f"❌ ELF 符号表加载异常: {result['error']}")
+                self.lbl_status_text.setText("ELF 解析失败，已保留数据库配置")
+                self._finish_initial_workspace_load(synchronize_elf=False)
+
+        worker.result_ready.connect(receive_result)
+        worker.finished.connect(finish_initial_parse)
+        worker.start()
+
+    def _finish_initial_workspace_load(self, synchronize_elf):
+        if self.initial_workspace_loaded:
+            return
+        self.load_history_from_db(synchronize_elf=synchronize_elf)
+        self.restore_workspace_state()
+        self.workspace_restore_in_progress = False
+        self.initial_workspace_loaded = True
+        self.schedule_workspace_save()
+
+    def _parse_elf_in_background(self, elf_path):
+        """Parse ELF on a worker while a local event loop keeps the UI responsive."""
+        result = {"ok": False, "database": None, "error": "ELF 解析线程未返回结果"}
+        loop = QEventLoop(self)
+        worker = ElfParseWorker(elf_path, self)
+        self.elf_parse_worker = worker
+
+        def receive_result(ok, database, error):
+            result.update(ok=bool(ok), database=database, error=str(error or ""))
+
+        worker.result_ready.connect(receive_result)
+        worker.finished.connect(loop.quit)
+        worker.start()
+        loop.exec()
+        worker.wait()
+        worker.deleteLater()
+        self.elf_parse_worker = None
+        return result["ok"], result["database"], result["error"]
+
     def reload_elf_symbols(self, show_message=True, source="manual"):
         """Atomically reload ELF/DWARF and refresh saved trees and channel addresses."""
+        if self.elf_reload_in_progress:
+            return False, "ELF 正在后台解析，请稍候"
         elf_path = os.path.abspath(self.config.elf_path) if self.config.elf_path else ""
         if not os.path.isfile(elf_path):
             error = f"找不到 ELF：\n{elf_path or '(未设置)'}"
             if show_message: QMessageBox.warning(self, "重新提取 ELF 失败", error)
             return False, error
 
-        try:
-            refreshed = ElfDatabase()
-            refreshed.load(elf_path)
-        except Exception as exc:
-            error = f"ELF 解析失败，已保留原来的变量数据：\n{exc}"
+        self.elf_reload_in_progress = True
+        self.lbl_status_text.setText("正在后台解析 ELF…")
+        ok, refreshed, parse_error = self._parse_elf_in_background(elf_path)
+        if not ok or refreshed is None:
+            self.elf_reload_in_progress = False
+            error = f"ELF 解析失败，已保留原来的变量数据：\n{parse_error}"
+            self.lbl_status_text.setText("ELF 解析失败，已保留原有变量")
             if show_message: QMessageBox.critical(self, "重新提取 ELF 失败", error)
             return False, error
 
         self.stop_sampling_thread()
 
-        self.elf_reload_in_progress = True
         try:
             self.elf_db = refreshed
             self.symbol_cache = dict(refreshed.symbols)
@@ -1627,7 +1694,9 @@ class MCUStudioWindow(QMainWindow):
                 for plot_idx, curves in enumerate(self.plot_curves_dict):
                     curve = curves.pop(path, None)
                     if curve is not None:
-                        try: self.plot_widgets[plot_idx].removeItem(curve)
+                        try:
+                            self.plot_legends[plot_idx].removeItem(path)
+                            self.plot_widgets[plot_idx].removeItem(curve)
                         except Exception: pass
             self.ch_paths = valid_paths
             self.ch_types = valid_types
@@ -1945,6 +2014,7 @@ class MCUStudioWindow(QMainWindow):
         btn_adv_c = QPushButton("ELF 变量浏览器")
         btn_adv_c.setObjectName("primaryButton")
         btn_adv_c.clicked.connect(self.open_advance_parser_window)
+        self.btn_elf_browser = btn_adv_c
 
         quick_caption = QLabel("变量")
         quick_caption.setObjectName("fieldCaption")
@@ -1982,6 +2052,7 @@ class MCUStudioWindow(QMainWindow):
         self.plot_splitter.setStyleSheet(f"QSplitter::handle {{ height: 4px; background-color: {self.theme_colors['splitter']}; }}")
         
         self.plot_widgets = []
+        self.plot_legends = []
         self.v_lines = []
         self.h_lines = []
         self.hover_dots = []
@@ -2004,6 +2075,17 @@ class MCUStudioWindow(QMainWindow):
             pw.getPlotItem().setMenuEnabled(False)
             pw.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             pw.customContextMenuRequested.connect(lambda pos, idx=i: self.show_plot_context_menu(pos, idx))
+
+            legend = pw.addLegend(
+                offset=(10, 8),
+                labelTextColor=self.theme_colors['axis_text'],
+                labelTextSize='10pt',
+                brush=pg.mkBrush(28, 28, 30, 205) if self.is_dark_theme else pg.mkBrush(255, 255, 255, 220),
+                pen=pg.mkPen(self.theme_colors['panel_border']),
+                colCount=3,
+            )
+            legend.setVisible(False)
+            self.plot_legends.append(legend)
 
             v_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(self.theme_colors['crosshair'], width=1, style=Qt.PenStyle.DashLine))
             h_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(self.theme_colors['crosshair'], width=1, style=Qt.PenStyle.DashLine))
@@ -2234,6 +2316,15 @@ class MCUStudioWindow(QMainWindow):
                 if self.hover_dots[i]: self.hover_dots[i].setVisible(False)
                 if self.hover_labels[i]: self.hover_labels[i].setVisible(False)
 
+    @staticmethod
+    def _padded_y_range(y_min, y_max):
+        y_span = float(y_max) - float(y_min)
+        if not np.isfinite(y_span) or y_span <= 0:
+            padding = max(abs(float(y_min)) * 0.1, 1.0)
+        else:
+            padding = max(y_span * 0.08, abs(float(y_min)) * 0.02, 0.01)
+        return float(y_min) - padding, float(y_max) + padding
+
     def toggle_measurement_mode(self, enabled):
         """Enter a frozen two-point delta measurement mode."""
         self.measurement_mode = bool(enabled)
@@ -2353,6 +2444,38 @@ class MCUStudioWindow(QMainWindow):
             return
         self.finish_canvas_auto_adapt()
 
+    def _place_plot_legend_away_from_data(self, plot_idx, x_values, y_values, x_range, y_range):
+        """Choose the least occupied plot corner for the compact legend."""
+        x_values = np.asarray(x_values, dtype=float)
+        y_values = np.asarray(y_values, dtype=float)
+        finite = np.isfinite(x_values) & np.isfinite(y_values)
+        if not finite.any():
+            return
+        x_values, y_values = x_values[finite], y_values[finite]
+        x_lower, x_upper = x_range
+        y_lower, y_upper = y_range
+        x_span = max(float(x_upper) - float(x_lower), 1e-12)
+        y_span = max(float(y_upper) - float(y_lower), 1e-12)
+        x_norm = np.clip((x_values - x_lower) / x_span, 0.0, 1.0)
+        y_norm = np.clip((y_values - y_lower) / y_span, 0.0, 1.0)
+        scores = {
+            "top-left": int(np.count_nonzero((x_norm <= 0.42) & (y_norm >= 0.68))),
+            "top-right": int(np.count_nonzero((x_norm >= 0.58) & (y_norm >= 0.68))),
+            "bottom-left": int(np.count_nonzero((x_norm <= 0.42) & (y_norm <= 0.32))),
+            "bottom-right": int(np.count_nonzero((x_norm >= 0.58) & (y_norm <= 0.32))),
+        }
+        # Stable tie order avoids the legend jumping between equally empty corners.
+        order = ("top-left", "top-right", "bottom-left", "bottom-right")
+        corner = min(order, key=lambda name: (scores[name], order.index(name)))
+        offsets = {
+            "top-left": (10, 8),
+            "top-right": (-10, 8),
+            "bottom-left": (10, -8),
+            "bottom-right": (-10, -8),
+        }
+        self.plot_legends[plot_idx].setOffset(offsets[corner])
+        self.plot_legend_corners[plot_idx] = corner
+
     def finish_canvas_auto_adapt(self):
         adapted = 0
         with QMutexLocker(self.buffer_mutex):
@@ -2379,12 +2502,11 @@ class MCUStudioWindow(QMainWindow):
                 x_upper = float(np.max(all_x))
                 x_lower = x_upper - self.max_display_duration_ms
                 y_min, y_max = float(np.min(all_y)), float(np.max(all_y))
-                y_span = y_max - y_min
-                y_padding = max(y_span * 0.08, abs(y_min) * 0.02, 0.01)
-                if not np.isfinite(y_span) or y_span <= 0:
-                    y_padding = max(abs(y_min) * 0.1, 1.0)
-                y_lower, y_upper = y_min - y_padding, y_max + y_padding
+                y_lower, y_upper = self._padded_y_range(y_min, y_max)
                 self.canvas_fixed_ranges[plot_idx] = (x_lower, x_upper, y_lower, y_upper)
+                self._place_plot_legend_away_from_data(
+                    plot_idx, all_x, all_y, (x_lower, x_upper), (y_lower, y_upper)
+                )
                 self.plot_widgets[plot_idx].setXRange(x_lower, x_upper, padding=0)
                 self.plot_widgets[plot_idx].setYRange(y_lower, y_upper, padding=0)
                 adapted += 1
@@ -2915,8 +3037,9 @@ class MCUStudioWindow(QMainWindow):
             if type_idx < self.input_type.count(): self.input_type.setCurrentIndex(type_idx)
         except: pass
 
-    def load_history_from_db(self):
-        self.synchronize_saved_variables_with_elf()
+    def load_history_from_db(self, synchronize_elf=True):
+        if synchronize_elf:
+            self.synchronize_saved_variables_with_elf()
         db_vars = self.db.get_all_vars()
         for row in db_vars:
             path, v_type, offset, base_var = row[0], row[1], row[2], row[3]
@@ -3083,6 +3206,7 @@ class MCUStudioWindow(QMainWindow):
             )
 
             pw = self.plot_widgets[i]
+            self.plot_legends[i].setVisible(bool(active_paths))
             if i >= 1 and layout_id < 2: continue
             if i == 2 and layout_id < 3: continue
             if pw.isHidden() or not pw.isVisible() or pw.width() <= 20 or pw.height() <= 20: continue
@@ -3112,9 +3236,10 @@ class MCUStudioWindow(QMainWindow):
                 curr_keys = list(curves_map.keys())
                 for pk in curr_keys:
                     if pk not in active_paths and pk in curves_map:
+                        self.plot_legends[i].removeItem(pk)
                         pw.removeItem(curves_map[pk])
                         del curves_map[pk]
-                
+
                 for path in active_paths:
                     try:
                         target_ch = self.ch_paths.index(path)
@@ -3131,7 +3256,7 @@ class MCUStudioWindow(QMainWindow):
                                 smooth_pen.setCosmetic(True)
                                 smooth_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
                                 smooth_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-                                curves_map[path] = pw.plot(pen=smooth_pen, antialias=True)
+                                curves_map[path] = pw.plot(pen=smooth_pen, antialias=True, name=path)
                                 curves_map[path].setClipToView(True)
                                 curves_map[path].setDownsampling(auto=True, method="peak")
                             curves_map[path].setData(x_arr, y_arr)
@@ -3284,6 +3409,7 @@ class MCUStudioWindow(QMainWindow):
         for plot_idx, curves in enumerate(self.plot_curves_dict):
             curve = curves.pop(path, None)
             if curve is not None:
+                self.plot_legends[plot_idx].removeItem(path)
                 self.plot_widgets[plot_idx].removeItem(curve)
 
     def _color_icon(self, color):
@@ -3446,6 +3572,7 @@ class MCUStudioWindow(QMainWindow):
                 if path in p_active: p_active.remove(path)
                 if path in self.plot_curves_dict[p_idx]:
                     try:
+                        self.plot_legends[p_idx].removeItem(path)
                         self.plot_widgets[p_idx].removeItem(self.plot_curves_dict[p_idx][path])
                         del self.plot_curves_dict[p_idx][path]
                     except: pass

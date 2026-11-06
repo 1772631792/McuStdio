@@ -66,13 +66,52 @@ def validate_imports_and_elf_helpers() -> None:
         and workers.BackendReconnectWorker.__name__ == "BackendReconnectWorker",
         "non-blocking read and reconnect workers import",
     )
+    read_channels = [
+        {"ch_idx": 0, "addr": 0x20000000, "width": 4},
+        {"ch_idx": 1, "addr": 0x20000004, "width": 4},
+        {"ch_idx": 2, "addr": 0x20000010, "width": 4},
+    ]
+    read_blocks = workers.build_contiguous_read_blocks(read_channels)
+    check(
+        [(start, size, len(members)) for start, size, members in read_blocks]
+        == [(0x20000000, 8, 2), (0x20000010, 4, 1)],
+        "contiguous J-Link variables share reads without touching address gaps",
+    )
+
+    class FakeJLink:
+        def __init__(self):
+            self.calls = []
+            self.worker = None
+
+        def memory_read8(self, address, count):
+            self.calls.append((address, count))
+            self.worker.running = False
+            return [0] * count
+
+    fake_link = FakeJLink()
+    batch_config = core.ProjectConfig()
+    batch_worker = workers.HighSpeedSamplingWorker(
+        batch_config,
+        {
+            0: ("0x20000000", "float", "first"),
+            1: ("0x20000004", "float", "second"),
+        },
+        0,
+        fake_link,
+    )
+    fake_link.worker = batch_worker
+    batch_worker.run()
+    check(
+        fake_link.calls == [(0x20000000, 8)],
+        "J-Link worker executes one DLL read for adjacent waveform variables",
+    )
     database = core.ElfDatabase()
     database.symbols = {"value": 0x20000000}
     database.types = {"value": {"kind": "scalar", "name": "uint32_t", "size": 4}}
     address, _type = database.resolve("value")
     check(address == 0x20000000, "ELF expression resolver executes")
 
-    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtCore import QPoint, QPointF, Qt, QThread
     from PyQt6.QtTest import QTest
     from PyQt6.QtWidgets import QApplication
 
@@ -143,9 +182,96 @@ def validate_imports_and_elf_helpers() -> None:
         check(
             studio.btn_freeze.property("plotTool")
             and studio.btn_canvas_adapt.property("plotTool")
+            and studio.btn_measure.property("plotTool")
             and studio.rad_map1.isCheckable(),
             "waveform controls use the compact plot toolbar",
         )
+        check(
+            studio.curve_palette[:3] == ["#30d158", "#ff9f0a", "#0a84ff"]
+            and not studio.plot_widgets[0].getPlotItem().menuEnabled(),
+            "waveforms use an automatic color palette without pyqtgraph menus",
+        )
+        studio.toggle_measurement_mode(True)
+        studio.ch_paths = ["measure.first", "measure.second"]
+        studio.ch_types = ["float", "float"]
+        studio.ch_addrs = ["0x20000000", "0x20000004"]
+        studio.plot_active_paths[0] = ["measure.first", "measure.second"]
+        studio.ch_time_stamps = [[10.0, 20.0, 30.0], [10.0, 25.5, 30.0]]
+        studio.ch_buffers = [[1.0, 2.0, 3.0], [1.5, 3.75, 2.5]]
+        measurement_view = studio.plot_widgets[0].getViewBox()
+        studio.plot_widgets[0].setXRange(0.0, 40.0, padding=0)
+        studio.plot_widgets[0].setYRange(0.0, 5.0, padding=0)
+        application.processEvents()
+        nearest = studio._nearest_visible_sample(
+            0, measurement_view.mapViewToScene(QPointF(25.5, 3.75))
+        )
+        studio.measurement_points[0] = [
+            (10.0, 1.25, 0, "first"),
+            (25.5, 3.75, 0, "second"),
+        ]
+        studio._render_measurement(0)
+        measurement_x, measurement_y = studio.measurement_lines[0].getData()
+        measurement_text = studio.lbl_measurement_result.text()
+        check(
+            studio.measurement_mode
+            and studio.is_frozen
+            and studio.btn_measure.text() == "测量中"
+            and nearest == (25.5, 3.75, 0, "measure.second")
+            and list(measurement_x) == [10.0, 25.5]
+            and list(measurement_y) == [1.25, 3.75]
+            and "Δt" in measurement_text
+            and "+15.50 ms" in measurement_text
+            and "ΔY" in measurement_text,
+            "two-point measurement renders snapped points and bottom-bar deltas",
+        )
+        studio.toggle_measurement_mode(False)
+        studio.ch_paths = []
+        studio.ch_types = []
+        studio.ch_addrs = []
+        studio.plot_active_paths = [[], [], []]
+        studio.ch_time_stamps = []
+        studio.ch_buffers = []
+        check(
+            not studio.measurement_mode
+            and studio.btn_measure.text() == "测量"
+            and studio.lbl_measurement_result.text() == "测量：未开启",
+            "leaving measurement mode clears its overlays",
+        )
+        # Resume after the measurement test so the global Space assertions below
+        # still start from the normal running state.
+        studio.toggle_freeze()
+        studio.db.save_var("multi_a", "float", 0, "0x20000000", 0)
+        studio.db.save_var("multi_b", "float", 0, "0x20000004", 0)
+        studio.inject_var_to_tree_ui("multi_a", "float", 0)
+        studio.inject_var_to_tree_ui("multi_b", "float", 0)
+        first_item = studio.debug_trees[0].topLevelItem(0)
+        second_item = studio.debug_trees[0].topLevelItem(1)
+        with patch.object(studio, "restart_sampling_thread"):
+            studio.bind_tree_item_to_channel(0, first_item)
+            studio.bind_tree_item_to_channel(0, second_item)
+        check(
+            studio.ch_paths == ["multi_a", "multi_b"]
+            and studio.plot_active_paths[0] == ["multi_a", "multi_b"]
+            and studio._curve_color("multi_a") != studio._curve_color("multi_b")
+            and "2 条曲线" in studio.lbl_ch1.text(),
+            "one display channel can bind and sample multiple variables",
+        )
+        studio.set_curve_color("multi_a", "#ff453a")
+        check(
+            studio._curve_color("multi_a") == "#ff453a"
+            and studio.db.get_config("curve_color:multi_a") == "#ff453a",
+            "curve colors can be changed and persisted per variable",
+        )
+        studio.db.delete_var("multi_a", 0)
+        studio.db.delete_var("multi_b", 0)
+        studio.debug_trees[0].clear()
+        studio.ch_paths = []
+        studio.ch_types = []
+        studio.ch_addrs = []
+        studio.ch_buffers = []
+        studio.ch_time_stamps = []
+        studio.plot_active_paths = [[], [], []]
+        studio.refresh_ui_channel_bar()
         ch2_x_before = studio.lbl_ch2.x()
         studio.lbl_ch1.setText("CH1: -1.23457e+12")
         application.processEvents()
@@ -221,10 +347,12 @@ def validate_imports_and_elf_helpers() -> None:
             and studio.btn_reconnect.styleSheet() == original_reconnect_style,
             "button feedback preserves text and restores theme colors",
         )
-        studio.ch_paths[0] = "preview.value"
+        studio.ch_paths = ["preview.value"]
+        studio.ch_types = ["float"]
+        studio.ch_addrs = ["0x20000000"]
         studio.plot_active_paths[0] = ["preview.value"]
-        studio.ch_time_stamps[0] = [0.0, 1000.0, 2000.0]
-        studio.ch_buffers[0] = [1.0, 3.0, 2.0]
+        studio.ch_time_stamps = [[0.0, 1000.0, 2000.0]]
+        studio.ch_buffers = [[1.0, 3.0, 2.0]]
         studio.start_canvas_auto_adapt()
         check(
             studio.canvas_fixed_ranges[0] is not None
@@ -243,7 +371,12 @@ def validate_imports_and_elf_helpers() -> None:
         studio.db.save_var("shared_value", "uint32", 0, "0x20000000", 0)
         studio.db.save_var("shared_value", "uint32", 0, "0x20000000", 1)
         studio.inject_var_to_tree_ui("shared_value", "uint32", 0)
-        studio.ch_paths[0] = "shared_value"
+        studio.ch_paths = ["shared_value"]
+        studio.ch_types = ["uint32"]
+        studio.ch_addrs = ["0x20000000"]
+        studio.ch_buffers = [[]]
+        studio.ch_time_stamps = [[]]
+        studio.plot_active_paths[0] = ["shared_value"]
         shared_root = studio.debug_trees[0].topLevelItem(0)
         studio.remove_variable_root(shared_root, studio.debug_trees[0])
         check(
@@ -251,9 +384,12 @@ def validate_imports_and_elf_helpers() -> None:
             "removing one duplicate watch keeps the shared waveform binding",
         )
         studio.db.delete_var("shared_value", 1)
-        studio.ch_paths[0] = None
-        studio.ch_buffers[0] = []
-        studio.ch_time_stamps[0] = []
+        studio.ch_paths = []
+        studio.ch_types = []
+        studio.ch_addrs = []
+        studio.ch_buffers = []
+        studio.ch_time_stamps = []
+        studio.plot_active_paths = [[], [], []]
         original_tree = studio.debug_trees[1]
         detachable_bar = studio.tab_widget.tabBar()
         check(hasattr(detachable_bar, "detach_requested"), "debug tabs support drag-out detaching")
@@ -273,8 +409,25 @@ def validate_imports_and_elf_helpers() -> None:
         studio.detached_debug_windows[1].close()
         application.processEvents()
         check(studio.tab_widget.count() == 3 and studio.tab_widget.widget(1) is original_tree, "closing a floating window restores the tab in order")
+        class BriefShutdownThread(QThread):
+            def run(self):
+                self.msleep(350)
+
+        shutdown_thread = BriefShutdownThread(studio)
+        shutdown_thread.finished.connect(shutdown_thread.deleteLater)
+        shutdown_thread.start()
         studio.close()
         application.processEvents()
+        check(
+            studio.isVisible() and shutdown_thread.isRunning(),
+            "window defers destruction while a managed QThread is still running",
+        )
+        QTest.qWait(700)
+        application.processEvents()
+        check(
+            not studio.isVisible(),
+            "window closes automatically after background QThreads finish",
+        )
         test_database.conn.close()
 
 

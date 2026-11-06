@@ -28,6 +28,23 @@ try:
 except ImportError:
     pylink = None
 
+
+def build_contiguous_read_blocks(channels, max_bytes=256):
+    """Group only touching/overlapping addresses, never unsafe unread gaps."""
+    blocks = []
+    for channel in sorted(channels, key=lambda item: (item["addr"], item["width"])):
+        start = int(channel["addr"])
+        end = start + int(channel["width"])
+        if blocks:
+            block = blocks[-1]
+            merged_end = max(block[1], end)
+            if start <= block[1] and merged_end - block[0] <= int(max_bytes):
+                block[1] = merged_end
+                block[2].append(channel)
+                continue
+        blocks.append([start, end, [channel]])
+    return [(start, end - start, members) for start, end, members in blocks]
+
 class ElfFlashWorker(QThread):
     """Run J-Link Commander and reconnect without blocking the Qt GUI."""
 
@@ -366,6 +383,7 @@ class HighSpeedSamplingWorker(QThread):
                 'is_signed': encoding in (0x05, 0x06) if info else "int" in norm_type and "uint" not in norm_type,
                 'byte_read': (width == 2 and addr_int % 2 != 0) or (width >= 4 and addr_int % 4 != 0),
             })
+        read_blocks = build_contiguous_read_blocks(parsed_channels)
 
         if self.config.backend_mode == "OPENOCD":
             if not parsed_channels:
@@ -379,6 +397,9 @@ class HighSpeedSamplingWorker(QThread):
                 use_block_read = (
                     (block_end - block_start) <= 128
                     and len(parsed_channels) > 1
+                    and len(read_blocks) == 1
+                    and block_start == min(addrs)
+                    and block_end == max(c['addr'] + c['width'] for c in parsed_channels)
                     and all(c['width'] <= 4 and not c['byte_read'] for c in parsed_channels)
                 )
                 def read_command(channel):
@@ -442,7 +463,17 @@ class HighSpeedSamplingWorker(QThread):
                 if self.jlink:
                     try:
                         with self.jlink_lock:
-                            for c in parsed_channels:
+                            for block_start, block_size, members in read_blocks:
+                                if len(members) > 1:
+                                    block = bytes(self.jlink.memory_read8(block_start, block_size))
+                                    if len(block) < block_size:
+                                        raise RuntimeError("J-Link contiguous read returned too few bytes")
+                                    for c in members:
+                                        offset = c['addr'] - block_start
+                                        raw = int.from_bytes(block[offset:offset + c['width']], "little")
+                                        packet[c['ch_idx']] = decode_sample_value(raw, c)
+                                    continue
+                                c = members[0]
                                 if c['width'] == 1: raw = self.jlink.memory_read8(c['addr'], 1)[0]
                                 elif c['width'] == 2: raw = self.jlink.memory_read16(c['addr'], 1)[0]
                                 elif c['width'] == 4: raw = self.jlink.memory_read32(c['addr'], 1)[0]

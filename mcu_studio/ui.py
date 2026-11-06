@@ -18,9 +18,11 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QFormLayout, QCheckBox as _QCheckBox, QSplitter, QTextEdit,
                              QRadioButton, QButtonGroup, QTabWidget, QFrame, QTabBar,
                              QStyle, QStyleOptionButton, QProgressBar)
-from PyQt6.QtCore import QTimer, Qt, QEvent, pyqtSignal, QVariantAnimation, QMutex, QMutexLocker
+from PyQt6.QtCore import (QTimer, Qt, QEvent, pyqtSignal, QVariantAnimation, QMutex,
+                          QMutexLocker, QPointF, QRectF, QThread)
 from PyQt6.QtGui import (QFont, QKeyEvent, QIntValidator, QDoubleValidator, QColor,
-                         QAction, QPen, QIcon, QPainter, QPalette, QPainterPath)
+                         QAction, QPen, QIcon, QPainter, QPalette, QPainterPath,
+                         QPixmap, QRegion)
 
 import pyqtgraph as pg
 
@@ -355,22 +357,42 @@ LIGHT_STYLE = """
 """
 
 POPUP_MENU_STYLE = """
-    QMenu { background-color: #ffffff; color: #1f2937; border: 1px solid #cbd5e1; padding: 6px; font-family: "Microsoft YaHei", "Consolas"; font-size: 13px; font-weight: bold; }
-    QMenu::item { padding: 6px 28px 6px 16px; border-radius: 4px; background-color: transparent; color: #1f2937; }
-    QMenu::item:selected { background-color: #dbeafe; color: #0f3f73; }
-    QMenu::separator { height: 1px; background-color: #dbe3ec; margin: 4px 0px; }
+    QMenu { background-color: #ffffff; color: #1f2937; border: 1px solid #c7d1dc; border-radius: 11px; padding: 7px; font-family: "Microsoft YaHei UI", "Microsoft YaHei"; font-size: 13px; }
+    QMenu::item { padding: 8px 30px 8px 13px; border-radius: 7px; margin: 1px 0px; background-color: transparent; color: #1f2937; }
+    QMenu::item:selected { background-color: #dff2fa; color: #066cae; }
+    QMenu::item:disabled { color: #9aa5b1; }
+    QMenu::separator { height: 1px; background-color: #d8e0e8; margin: 6px 9px; }
 """
 
 DARK_POPUP_MENU_STYLE = """
-    QMenu { background-color: #252526; color: #d4d4d4; border: 1px solid #454545; padding: 5px; font-family: "Microsoft YaHei UI", "Microsoft YaHei"; font-size: 12px; }
-    QMenu::item { padding: 6px 28px 6px 14px; border-radius: 2px; background-color: transparent; }
-    QMenu::item:selected { background-color: #094771; color: #ffffff; }
-    QMenu::separator { height: 1px; background-color: #454545; margin: 4px 0px; }
+    QMenu { background-color: #20242b; color: #e6e9ee; border: 1px solid #3d4858; border-radius: 11px; padding: 7px; font-family: "Microsoft YaHei UI", "Microsoft YaHei"; font-size: 13px; }
+    QMenu::item { padding: 8px 30px 8px 13px; border-radius: 7px; margin: 1px 0px; background-color: transparent; }
+    QMenu::item:selected { background-color: #293b54; color: #ffffff; }
+    QMenu::item:disabled { color: #6f7b89; }
+    QMenu::separator { height: 1px; background-color: #3d4858; margin: 6px 9px; }
 """
 
 
 def application_theme_stylesheet(theme_mode):
     return LIGHT_STYLE if str(theme_mode).upper() == "LIGHT" else DARK_STYLE
+
+
+class RoundedMenu(QMenu):
+    """Rounded application menu with matching rounded submenus."""
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), 11, 11)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+    def addMenu(self, menu_or_title):
+        if isinstance(menu_or_title, str):
+            submenu = RoundedMenu(menu_or_title, self)
+            submenu.setStyleSheet(self.styleSheet())
+            super().addMenu(submenu)
+            return submenu
+        return super().addMenu(menu_or_title)
 
 
 class DetachableTabBar(QTabBar):
@@ -508,7 +530,7 @@ class ElfVariableDialog(QDialog):
         if item is None:
             return
         self.tree.setCurrentItem(item)
-        menu = QMenu(self)
+        menu = RoundedMenu(self)
         menu.setStyleSheet(self.parent().popup_menu_style if hasattr(self.parent(), "popup_menu_style") else "")
         actions = [
             menu.addAction("添加到主调试窗口"),
@@ -1164,14 +1186,14 @@ class MCUStudioWindow(QMainWindow):
             'hover_fill': '#252526', 'splitter': '#2d2d30', 'panel': '#1f1f1f',
             'panel_border': '#333337', 'neutral_button': '#2a2d2e',
             'neutral_text': '#e5e5e5', 'status_ok': '#4ec96b',
-            'channels': ['#36c96b', '#f0a020', '#36b7d9'],
+            'measurement': '#bf5af2',
         } if self.is_dark_theme else {
             'plot_bg': '#ffffff', 'axis': '#64748b', 'axis_text': '#374151',
             'crosshair': '#64748b', 'hover_pen': '#1f2937', 'hover_text': '#111827',
             'hover_fill': '#f1f5f9', 'splitter': '#dbe3ec', 'panel': '#ffffff',
             'panel_border': '#dbe3ec', 'neutral_button': '#ffffff',
             'neutral_text': '#1f2937', 'status_ok': '#2e7d32',
-            'channels': ['#008a3b', '#d97706', '#0284c7'],
+            'measurement': '#8e44ad',
         })
         self.popup_menu_style = DARK_POPUP_MENU_STYLE if self.is_dark_theme else POPUP_MENU_STYLE
         self.setWindowTitle(f"MCU Live Watch Studio - [{'原生J-Link独占' if config.backend_mode=='JLINK' else 'OpenOCD驱动'}]")
@@ -1183,6 +1205,7 @@ class MCUStudioWindow(QMainWindow):
         self.low_speed_worker = None
         self.low_speed_pending = {}
         self.retired_workers = []
+        self.sampling_restart_pending = False
         self.backend_close_workers = []
         self.reconnect_worker = None
         self.backend_suspended = False
@@ -1192,11 +1215,13 @@ class MCUStudioWindow(QMainWindow):
         self.jlink_lock = threading.RLock()
         self.openocd_link_alive = False  
         
-        self.ch_paths = [None, None, None]     
-        self.ch_types = [None, None, None]     
-        self.ch_addrs = [None, None, None]     
-        self.ch_buffers = [[], [], []]         
-        self.ch_time_stamps = [[], [], []]     
+        # Sampling variables are dynamic.  CH1/CH2/CH3 are display groups,
+        # not three hard limits on the number of watched waveforms.
+        self.ch_paths = []
+        self.ch_types = []
+        self.ch_addrs = []
+        self.ch_buffers = []
+        self.ch_time_stamps = []
         
         self.buffer_mutex = QMutex()
         self.layout_switching = False
@@ -1208,6 +1233,21 @@ class MCUStudioWindow(QMainWindow):
         self.start_time = time.time()          
         self.max_display_duration_ms = 5000    
         self.is_frozen = False
+        self.measurement_mode = False
+        self.measurement_points = [[], [], []]
+        self.curve_palette = [
+            '#30d158', '#ff9f0a', '#0a84ff', '#bf5af2',
+            '#ff375f', '#64d2ff', '#ff453a', '#ffd60a',
+            '#40c8a0', '#5e5ce6', '#ac8e68', '#e66dad',
+        ]
+        self.curve_color_names = [
+            '翠绿', '橙色', '蓝色', '紫色',
+            '玫红', '天蓝', '红色', '金黄',
+            '青绿', '靛蓝', '棕色', '粉色',
+        ]
+        self.curve_colors = {}
+        self.hover_last_update = [0.0, 0.0, 0.0]
+        self.hover_last_point = [None, None, None]
         self.canvas_fixed_ranges = [None, None, None]
         self.tcl_socket = None
         self.heartbeat_state = False
@@ -1318,28 +1358,31 @@ class MCUStudioWindow(QMainWindow):
             self.load_history_from_db()
 
             current_rows = {row[0]: row for row in self.db.get_all_vars()}
-            for ch_idx, path in enumerate(list(self.ch_paths)):
-                row = current_rows.get(path) if path else None
-                if row is None:
-                    if path:
-                        for active in self.plot_active_paths:
-                            if path in active: active.remove(path)
-                        for plot_idx, curves in enumerate(self.plot_curves_dict):
-                            curve = curves.pop(path, None)
-                            if curve is not None:
-                                try: self.plot_widgets[plot_idx].removeItem(curve)
-                                except Exception: pass
-                    self.ch_paths[ch_idx] = self.ch_types[ch_idx] = self.ch_addrs[ch_idx] = None
-                else:
+            valid_paths, valid_types, valid_addrs = [], [], []
+            for path in list(self.ch_paths):
+                row = current_rows.get(path)
+                if row is not None:
                     _name, v_type, offset, base_var, _tab_idx = row
-                    base_address = int(base_var, 16) if base_var.startswith(("0x", "0X")) else self.symbol_cache.get(base_var)
-                    if base_address is None:
-                        self.ch_paths[ch_idx] = self.ch_types[ch_idx] = self.ch_addrs[ch_idx] = None
-                    else:
-                        self.ch_types[ch_idx] = v_type
-                        self.ch_addrs[ch_idx] = hex(base_address + offset)
-                self.ch_buffers[ch_idx] = []
-                self.ch_time_stamps[ch_idx] = []
+                    base_address = (int(base_var, 16) if base_var.startswith(("0x", "0X"))
+                                    else self.symbol_cache.get(base_var))
+                    if base_address is not None:
+                        valid_paths.append(path)
+                        valid_types.append(v_type)
+                        valid_addrs.append(hex(base_address + offset))
+                        continue
+                for active in self.plot_active_paths:
+                    while path in active:
+                        active.remove(path)
+                for plot_idx, curves in enumerate(self.plot_curves_dict):
+                    curve = curves.pop(path, None)
+                    if curve is not None:
+                        try: self.plot_widgets[plot_idx].removeItem(curve)
+                        except Exception: pass
+            self.ch_paths = valid_paths
+            self.ch_types = valid_types
+            self.ch_addrs = valid_addrs
+            self.ch_buffers = [[] for _path in valid_paths]
+            self.ch_time_stamps = [[] for _path in valid_paths]
 
             if hasattr(self, 'adv_parse_dialog') and self.adv_parse_dialog:
                 try: self.adv_parse_dialog.replace_elf_database(refreshed)
@@ -1560,6 +1603,12 @@ class MCUStudioWindow(QMainWindow):
         self.btn_canvas_adapt.setProperty("plotTool", True)
         self.btn_canvas_adapt.setToolTip("立即按当前时间窗内的数据适配纵轴范围")
         self.btn_canvas_adapt.clicked.connect(self.start_canvas_auto_adapt)
+
+        self.btn_measure = QPushButton("测量")
+        self.btn_measure.setProperty("plotTool", True)
+        self.btn_measure.setCheckable(True)
+        self.btn_measure.setToolTip("冻结波形后依次点击两个采样点，显示横轴与纵轴差值")
+        self.btn_measure.clicked.connect(self.toggle_measurement_mode)
         
         self.btn_disconnect = QPushButton("断开")
         self.btn_disconnect.setToolTip("立即停止软件读写并在后台释放通信后端；拔掉实际线路卡住时界面不会等待")
@@ -1671,11 +1720,12 @@ class MCUStudioWindow(QMainWindow):
         self.plot_splitter.setStyleSheet(f"QSplitter::handle {{ height: 4px; background-color: {self.theme_colors['splitter']}; }}")
         
         self.plot_widgets = []
-        self.ch_colors = self.theme_colors['channels']
         self.v_lines = []
         self.h_lines = []
         self.hover_dots = []
         self.hover_labels = []
+        self.measurement_lines = []
+        self.measurement_dots = []
 
         for i in range(3):
             pw = pg.PlotWidget()
@@ -1688,6 +1738,7 @@ class MCUStudioWindow(QMainWindow):
                 axis.setPen(pg.mkPen(self.theme_colors['axis']))
                 axis.setTextPen(pg.mkPen(self.theme_colors['axis_text']))
             pw.getViewBox().setDefaultPadding(0.0)
+            pw.getPlotItem().setMenuEnabled(False)
             pw.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             pw.customContextMenuRequested.connect(lambda pos, idx=i: self.show_plot_context_menu(pos, idx))
 
@@ -1710,6 +1761,23 @@ class MCUStudioWindow(QMainWindow):
             pw.addItem(hover_label)
             self.hover_labels.append(hover_label)
             pw.scene().sigMouseMoved.connect(lambda pos, idx=i: self.handle_plot_mouse_move(pos, idx))
+
+            measure_line = pg.PlotDataItem(
+                pen=pg.mkPen(self.theme_colors['measurement'], width=2, style=Qt.PenStyle.DashLine)
+            )
+            measure_line.setZValue(30)
+            pw.addItem(measure_line)
+            self.measurement_lines.append(measure_line)
+
+            measure_dots = pg.ScatterPlotItem(
+                size=12,
+                pen=pg.mkPen(self.theme_colors['hover_pen'], width=2),
+            )
+            measure_dots.setZValue(31)
+            pw.addItem(measure_dots)
+            self.measurement_dots.append(measure_dots)
+
+            pw.scene().sigMouseClicked.connect(lambda event, idx=i: self.handle_measurement_click(event, idx))
 
             self.plot_widgets.append(pw)
             self.plot_splitter.addWidget(pw)
@@ -1738,6 +1806,7 @@ class MCUStudioWindow(QMainWindow):
         plot_toolbar.addWidget(self.btn_export_csv)
         plot_toolbar.addWidget(self.btn_freeze)
         plot_toolbar.addWidget(self.btn_canvas_adapt)
+        plot_toolbar.addWidget(self.btn_measure)
         plot_toolbar.addSpacing(10)
         plot_toolbar.addWidget(self.rad_map1)
         plot_toolbar.addWidget(self.rad_map2)
@@ -1759,9 +1828,10 @@ class MCUStudioWindow(QMainWindow):
         
         ch_style = ("font-family: 'Consolas'; font-size: 13px; font-weight: bold; padding: 3px 11px; "
                     f"border-radius: 4px; background-color: {self.theme_colors['panel']}; border: 1px solid {self.theme_colors['panel_border']};")
-        self.lbl_ch1.setStyleSheet(f"{ch_style} color: {self.ch_colors[0]};")
-        self.lbl_ch2.setStyleSheet(f"{ch_style} color: {self.ch_colors[1]};")
-        self.lbl_ch3.setStyleSheet(f"{ch_style} color: {self.ch_colors[2]};")
+        neutral_channel_style = f"{ch_style} color: {self.theme_colors['neutral_text']};"
+        self.lbl_ch1.setStyleSheet(neutral_channel_style)
+        self.lbl_ch2.setStyleSheet(neutral_channel_style)
+        self.lbl_ch3.setStyleSheet(neutral_channel_style)
         for label in (self.lbl_ch1, self.lbl_ch2, self.lbl_ch3):
             label.setFixedWidth(170)
             label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -1769,6 +1839,17 @@ class MCUStudioWindow(QMainWindow):
         bottom_bar.addWidget(self.lbl_ch1)
         bottom_bar.addWidget(self.lbl_ch2)
         bottom_bar.addWidget(self.lbl_ch3)
+        bottom_bar.addSpacing(12)
+        self.lbl_measurement_result = QLabel("测量：未开启")
+        self.lbl_measurement_result.setFixedWidth(300)
+        self.lbl_measurement_result.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_measurement_result.setStyleSheet(
+            f"font-family: 'Consolas'; font-size: 12px; font-weight: 700; padding: 3px 10px; "
+            f"border-radius: 4px; color: {self.theme_colors['neutral_text']}; "
+            f"background-color: {self.theme_colors['panel']}; "
+            f"border: 1px solid {self.theme_colors['panel_border']};"
+        )
+        bottom_bar.addWidget(self.lbl_measurement_result)
         bottom_bar.addStretch()
 
         self.flash_status_widget = QWidget()
@@ -1877,11 +1958,130 @@ class MCUStudioWindow(QMainWindow):
             self.btn_freeze.setText("继续")
         else:
             self.btn_freeze.setText("暂停")
+            if self.measurement_mode:
+                self.measurement_mode = False
+                self.btn_measure.setChecked(False)
+                self.btn_measure.setText("测量")
+                self.btn_measure.setToolTip("冻结波形后依次点击两个采样点，显示横轴与纵轴差值")
+                self.clear_measurements()
             for i in range(3):
                 if self.v_lines[i]: self.v_lines[i].setVisible(False)
                 if self.h_lines[i]: self.h_lines[i].setVisible(False)
                 if self.hover_dots[i]: self.hover_dots[i].setVisible(False)
                 if self.hover_labels[i]: self.hover_labels[i].setVisible(False)
+
+    def toggle_measurement_mode(self, enabled):
+        """Enter a frozen two-point delta measurement mode."""
+        self.measurement_mode = bool(enabled)
+        self.btn_measure.setChecked(self.measurement_mode)
+        self.clear_measurements()
+        if self.measurement_mode:
+            if not self.is_frozen:
+                self.toggle_freeze()
+            for plot_idx in range(3):
+                self.v_lines[plot_idx].setVisible(False)
+                self.h_lines[plot_idx].setVisible(False)
+                self.hover_dots[plot_idx].setVisible(False)
+                self.hover_labels[plot_idx].setVisible(False)
+            self.btn_measure.setText("测量中")
+            self.btn_measure.setToolTip("在曲线上依次点击两个采样点；第三次点击会开始下一次测量")
+            self.lbl_measurement_result.setText("测量：请点击第一个采样点")
+        else:
+            self.btn_measure.setText("测量")
+            self.btn_measure.setToolTip("冻结波形后依次点击两个采样点，显示横轴与纵轴差值")
+            self.lbl_measurement_result.setText("测量：未开启")
+
+    def clear_measurements(self):
+        self.measurement_points = [[], [], []]
+        for line in getattr(self, "measurement_lines", []):
+            line.setData([], [])
+        for dots in getattr(self, "measurement_dots", []):
+            dots.setData([], [])
+        if hasattr(self, "lbl_measurement_result"):
+            self.lbl_measurement_result.setText(
+                "测量：请点击第一个采样点" if self.measurement_mode else "测量：未开启"
+            )
+
+    def _nearest_visible_sample(self, plot_idx, scene_pos, max_distance=34.0):
+        """Return the visible sample closest to a scene click in screen pixels."""
+        pw = self.plot_widgets[plot_idx]
+        view_box = pw.getViewBox()
+        x_mouse = view_box.mapSceneToView(scene_pos).x()
+        candidates_to_map = []
+        with QMutexLocker(self.buffer_mutex):
+            for path in self.plot_active_paths[plot_idx]:
+                try:
+                    channel_idx = self.ch_paths.index(path)
+                except ValueError:
+                    continue
+                timestamps = self.ch_time_stamps[channel_idx]
+                values = self.ch_buffers[channel_idx]
+                count = min(len(timestamps), len(values))
+                if not count:
+                    continue
+                index = bisect.bisect_left(timestamps, x_mouse, 0, count)
+                candidates = {max(0, min(count - 1, index)), max(0, min(count - 1, index - 1))}
+                for candidate in candidates:
+                    x_value = float(timestamps[candidate])
+                    y_value = float(values[candidate])
+                    if not np.isfinite(x_value) or not np.isfinite(y_value):
+                        continue
+                    candidates_to_map.append((x_value, y_value, plot_idx, path))
+        best = None
+        best_distance_sq = float(max_distance) ** 2
+        for candidate in candidates_to_map:
+            sample_scene = view_box.mapViewToScene(QPointF(candidate[0], candidate[1]))
+            distance_sq = ((sample_scene.x() - scene_pos.x()) ** 2
+                           + (sample_scene.y() - scene_pos.y()) ** 2)
+            if distance_sq <= best_distance_sq:
+                best_distance_sq = distance_sq
+                best = candidate
+        return best
+
+    def handle_measurement_click(self, event, plot_idx):
+        if (not self.measurement_mode or self.layout_switching
+                or event.button() != Qt.MouseButton.LeftButton):
+            return
+        pw = self.plot_widgets[plot_idx]
+        if pw.isHidden() or not pw.isVisible():
+            return
+        point = self._nearest_visible_sample(plot_idx, event.scenePos())
+        if point is None:
+            return
+        points = self.measurement_points[plot_idx]
+        if len(points) >= 2:
+            points.clear()
+        points.append(point)
+        self._render_measurement(plot_idx)
+        event.accept()
+
+    def _render_measurement(self, plot_idx):
+        points = self.measurement_points[plot_idx]
+        line = self.measurement_lines[plot_idx]
+        dots = self.measurement_dots[plot_idx]
+        if not points:
+            line.setData([], [])
+            dots.setData([], [])
+            return
+        x_values = [point[0] for point in points]
+        y_values = [point[1] for point in points]
+        brushes = [pg.mkBrush(self._curve_color(point[3])) for point in points]
+        dots.setData(x_values, y_values, brush=brushes)
+        if len(points) == 1:
+            line.setData([], [])
+            self.lbl_measurement_result.setText(
+                f"P1 · CH{points[0][2] + 1}   t {points[0][0]:.2f} ms   y {points[0][1]:.6g}"
+            )
+            self.lbl_measurement_result.setToolTip(points[0][3])
+            return
+        first, second = points
+        delta_x = second[0] - first[0]
+        delta_y = second[1] - first[1]
+        line.setData(x_values, y_values)
+        self.lbl_measurement_result.setText(
+            f"Δt {delta_x:+.2f} ms    ΔY {delta_y:+.6g}"
+        )
+        self.lbl_measurement_result.setToolTip(f"P1: {first[3]}\nP2: {second[3]}")
 
     def start_canvas_auto_adapt(self):
         if not any(self.ch_paths):
@@ -2055,6 +2255,7 @@ class MCUStudioWindow(QMainWindow):
         self.openocd_link_alive = False
         self.openocd_flash_worker = OpenOcdFlashWorker(self.config, elf_path, self)
         self.openocd_flash_worker.finished_signal.connect(self.handle_openocd_flash_finished)
+        self.openocd_flash_worker.finished.connect(self.openocd_flash_worker.deleteLater)
         self.openocd_flash_worker.start()
 
     def _start_pending_flash(self):
@@ -2066,6 +2267,7 @@ class MCUStudioWindow(QMainWindow):
             *args, self
         )
         self.flash_worker.finished_signal.connect(self.handle_flash_finished)
+        self.flash_worker.finished.connect(self.flash_worker.deleteLater)
         self.flash_worker.start()
 
     @staticmethod
@@ -2145,8 +2347,6 @@ class MCUStudioWindow(QMainWindow):
     def handle_openocd_flash_finished(self, success, message, backend_ready):
         worker = getattr(self, "openocd_flash_worker", None)
         self.openocd_flash_worker = None
-        if worker:
-            worker.deleteLater()
         self.flash_sequence_active = False
         self.backend_suspended = not backend_ready
         self.btn_flash.setText("烧录")
@@ -2205,13 +2405,12 @@ class MCUStudioWindow(QMainWindow):
     def _start_backend_reconnect(self):
         self.reconnect_worker = BackendReconnectWorker(self.config, self.jlink_lock, self)
         self.reconnect_worker.finished_signal.connect(self._backend_reconnect_finished)
+        self.reconnect_worker.finished.connect(self.reconnect_worker.deleteLater)
         self.reconnect_worker.start()
 
     def _backend_reconnect_finished(self, success, error, backend):
         worker = self.reconnect_worker
         self.reconnect_worker = None
-        if worker:
-            worker.deleteLater()
         if success:
             if self.config.backend_mode == "OPENOCD":
                 self.tcl_socket = backend
@@ -2259,12 +2458,12 @@ class MCUStudioWindow(QMainWindow):
             lambda error, worker=closer, action=next_action:
             self._native_link_closed(worker, error, action)
         )
+        closer.finished.connect(closer.deleteLater)
         closer.start()
 
     def _native_link_closed(self, worker, error, next_action):
         if worker in self.backend_close_workers:
             self.backend_close_workers.remove(worker)
-        worker.deleteLater()
         if next_action == "reconnect":
             self._start_backend_reconnect()
         elif next_action == "flash":
@@ -2361,7 +2560,11 @@ class MCUStudioWindow(QMainWindow):
         # Copy paired samples under the existing lock; dialogs and disk I/O never hold it.
         with QMutexLocker(self.buffer_mutex):
             snapshots = [
-                (i, path, list(zip(self.ch_time_stamps[i], self.ch_buffers[i])))
+                (
+                    next((plot_idx for plot_idx, paths in enumerate(self.plot_active_paths) if path in paths), 0),
+                    path,
+                    list(zip(self.ch_time_stamps[i], self.ch_buffers[i])),
+                )
                 for i, path in enumerate(self.ch_paths) if path
             ]
         if not snapshots:
@@ -2433,9 +2636,11 @@ class MCUStudioWindow(QMainWindow):
         for timestamp, data_packet in batch_data:
             current_rel_time = (timestamp - self.start_time) * 1000.0
             for ch_idx, val in data_packet.items():
+                if not 0 <= int(ch_idx) < len(self.ch_buffers):
+                    continue
                 self.ch_buffers[ch_idx].append(val)
                 self.ch_time_stamps[ch_idx].append(current_rel_time)
-        for i in range(3):
+        for i in range(len(self.ch_buffers)):
             if len(self.ch_buffers[i]) > 40000:
                 self.ch_buffers[i] = self.ch_buffers[i][-25000:]
                 self.ch_time_stamps[i] = self.ch_time_stamps[i][-25000:]
@@ -2477,12 +2682,10 @@ class MCUStudioWindow(QMainWindow):
         for i in range(3):
             active_paths = self.plot_active_paths[i]
             curves_map = self.plot_curves_dict[i]
-            ch_idx = -1
-            for path in active_paths:
-                for c_i in range(3):
-                    if self.ch_paths[c_i] == path:
-                        ch_idx = c_i; break
-                if ch_idx != -1: break
+            ch_idx = next(
+                (self.ch_paths.index(path) for path in active_paths if path in self.ch_paths),
+                -1,
+            )
 
             pw = self.plot_widgets[i]
             if i >= 1 and layout_id < 2: continue
@@ -2518,9 +2721,10 @@ class MCUStudioWindow(QMainWindow):
                         del curves_map[pk]
                 
                 for path in active_paths:
-                    target_ch = -1
-                    for c_i in range(3):
-                        if self.ch_paths[c_i] == path: target_ch = c_i; break
+                    try:
+                        target_ch = self.ch_paths.index(path)
+                    except ValueError:
+                        target_ch = -1
                     if target_ch != -1 and self.ch_buffers[target_ch]:
                         t_data = self.ch_time_stamps[target_ch]
                         v_data = self.ch_buffers[target_ch]
@@ -2528,7 +2732,7 @@ class MCUStudioWindow(QMainWindow):
                         if len(t_data) > start_idx:
                             x_arr, y_arr = self._display_plot_data(t_data, v_data, start_idx)
                             if path not in curves_map:
-                                smooth_pen = QPen(QColor(self.ch_colors[target_ch]), 2.0)
+                                smooth_pen = QPen(QColor(self._curve_color(path)), 2.0)
                                 smooth_pen.setCosmetic(True)
                                 smooth_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
                                 smooth_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -2540,33 +2744,25 @@ class MCUStudioWindow(QMainWindow):
 
     def handle_plot_mouse_move(self, pos, plot_idx):
         if not self.is_frozen or self.layout_switching: return
+        if self.measurement_mode:
+            return
+        now = time.monotonic()
+        if now - self.hover_last_update[plot_idx] < 0.033:
+            return
+        self.hover_last_update[plot_idx] = now
         pw = self.plot_widgets[plot_idx]
         if pw.isHidden() or not pw.isVisible() or pw.width() <= 20 or pw.height() <= 20: return
 
-        active_paths = self.plot_active_paths[plot_idx]
-        target_ch = -1
-        for path in active_paths:
-            for c_i in range(3):
-                if self.ch_paths[c_i] == path: target_ch = c_i; break
-            if target_ch != -1: break
-
-        locker = QMutexLocker(self.buffer_mutex)
-        if target_ch == -1 or not self.ch_buffers[target_ch]: return
-        t_data = self.ch_time_stamps[target_ch]
-        v_data = self.ch_buffers[target_ch]
-
         try:
             if not pw.getPlotItem().scene(): return
-            mouse_point = pw.getViewBox().mapSceneToView(pos)
-            x_mouse = mouse_point.x()
-            idx = bisect.bisect_left(t_data, x_mouse)
-            if idx == 0: closest_idx = 0
-            elif idx >= len(t_data): closest_idx = len(t_data) - 1
-            else: closest_idx = idx if (t_data[idx] - x_mouse) < (x_mouse - t_data[idx-1]) else (idx - 1)
-
-            if closest_idx >= len(t_data): return
-            exact_x = t_data[closest_idx]
-            exact_y = v_data[closest_idx]
+            nearest = self._nearest_visible_sample(plot_idx, pos)
+            if nearest is None:
+                return
+            exact_x, exact_y, _display_channel, path = nearest
+            point_key = (path, exact_x, exact_y)
+            if point_key == self.hover_last_point[plot_idx]:
+                return
+            self.hover_last_point[plot_idx] = point_key
 
             if self.v_lines[plot_idx]: self.v_lines[plot_idx].setPos(exact_x)
             if self.h_lines[plot_idx]: self.h_lines[plot_idx].setPos(exact_y)
@@ -2574,52 +2770,191 @@ class MCUStudioWindow(QMainWindow):
             if self.h_lines[plot_idx]: self.h_lines[plot_idx].setVisible(True)
 
             if self.hover_dots[plot_idx]:
-                self.hover_dots[plot_idx].setData([exact_x], [exact_y], brush=pg.mkBrush(self.ch_colors[target_ch]))
+                self.hover_dots[plot_idx].setData(
+                    [exact_x], [exact_y], brush=pg.mkBrush(self._curve_color(path))
+                )
                 self.hover_dots[plot_idx].setVisible(True)
 
             if self.hover_labels[plot_idx]:
-                self.hover_labels[plot_idx].setText(f" t: {exact_x:.1f} ms\n v: {exact_y:.4f} ")
+                self.hover_labels[plot_idx].setText(f" {path}\n t: {exact_x:.1f} ms  ·  v: {exact_y:.4f} ")
                 self.hover_labels[plot_idx].setPos(exact_x, exact_y)
                 self.hover_labels[plot_idx].setVisible(True)
         except: pass
 
     def show_plot_context_menu(self, pos, plot_idx):
-        if self.layout_switching: return
-        available_paths = [p for p in self.ch_paths if p is not None]
+        """Show only MCU Studio actions; never expose pyqtgraph's internal menu."""
+        if self.layout_switching:
+            return
         pw = self.plot_widgets[plot_idx]
-        if pw.isHidden() or not pw.isVisible(): return
-        try:
-            menu = pw.getPlotItem().getContextMenus(None)
-            menu.setStyleSheet(self.popup_menu_style)
-            y_val_menu = None
-            for act in menu.actions():
-                if act.menu() and "Y_Val" in act.menu().title():
-                    y_val_menu = act.menu(); y_val_menu.clear(); break
-            if not y_val_menu:
-                y_val_menu = QMenu("📈 Y_Val 数据源定义", menu)
-                menu.insertMenu(menu.actions()[0] if menu.actions() else None, y_val_menu)
-            y_val_menu.setStyleSheet(self.popup_menu_style)
-            
-            if not available_paths:
-                action = QAction("⚠️ 暂无高速通道绑定的变量", y_val_menu)
-                action.setEnabled(False)
-                y_val_menu.addAction(action)
-            else:
-                for path in available_paths:
-                    is_selected = path in self.plot_active_paths[plot_idx]
-                    action = QAction(f"{'●   ' if is_selected else '○   '}{path}", y_val_menu)
-                    action.triggered.connect(lambda checked, p=path, p_idx=plot_idx, current_state=is_selected: 
-                        self.commit_vofa_layer_selection(p, p_idx, current_state))
-                    y_val_menu.addAction(action)
-            menu.exec(pw.mapToGlobal(pos))
-        except: pass
+        if pw.isHidden() or not pw.isVisible():
+            return
 
-    def commit_vofa_layer_selection(self, path, plot_idx, current_state):
-        if not current_state:
-            if path not in self.plot_active_paths[plot_idx]: self.plot_active_paths[plot_idx].append(path)
+        menu = RoundedMenu(self)
+        menu.setStyleSheet(self.popup_menu_style)
+        scalar_items = self._debug_scalar_items()
+        channel_menu = menu.addMenu(f"添加变量到 CH{plot_idx + 1}")
+        if not scalar_items:
+            unavailable = channel_menu.addAction("调试窗口中暂无标量变量")
+            unavailable.setEnabled(False)
         else:
-            if path in self.plot_active_paths[plot_idx]: self.plot_active_paths[plot_idx].remove(path)
+            for _slot, title, items in scalar_items:
+                window_menu = channel_menu.addMenu(title)
+                for item in items:
+                    path = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
+                    action = window_menu.addAction(path)
+                    action.setCheckable(True)
+                    action.setChecked(path in self.plot_active_paths[plot_idx])
+                    action.triggered.connect(
+                        lambda checked=False, tree_item=item, target_plot=plot_idx:
+                        self.bind_tree_item_to_channel(target_plot, tree_item)
+                        if checked else self.set_plot_channel_visible(
+                            tree_item.data(0, Qt.ItemDataRole.UserRole) or tree_item.text(0),
+                            target_plot,
+                            False,
+                        )
+                    )
+
+        menu.addSeparator()
+        visible_menu = menu.addMenu("本图显示通道")
+        for path in list(self.plot_active_paths[plot_idx]):
+            action = visible_menu.addAction(self._color_icon(self._curve_color(path)), path)
+            action.setCheckable(True)
+            action.setChecked(True)
+            action.triggered.connect(
+                lambda checked, p=path, target_plot=plot_idx:
+                self.set_plot_channel_visible(p, target_plot, checked)
+            )
+        if not self.plot_active_paths[plot_idx]:
+            empty = visible_menu.addAction("当前 CH 暂无变量")
+            empty.setEnabled(False)
+
+        color_menu = menu.addMenu("曲线颜色")
+        if self.plot_active_paths[plot_idx]:
+            for path in self.plot_active_paths[plot_idx]:
+                path_menu = color_menu.addMenu(path)
+                path_menu.setIcon(self._color_icon(self._curve_color(path)))
+                self._populate_curve_color_menu(path_menu, path)
+        else:
+            empty = color_menu.addAction("当前 CH 暂无变量")
+            empty.setEnabled(False)
+
+        menu.addSeparator()
+        measure_action = menu.addAction("两点差值测量")
+        measure_action.setCheckable(True)
+        measure_action.setChecked(self.measurement_mode)
+        adapt_action = menu.addAction("自动适应当前波形")
+        clear_action = menu.addAction("清除测量标记")
+        clear_action.setEnabled(any(self.measurement_points))
+        chosen = menu.exec(pw.mapToGlobal(pos))
+        if chosen == measure_action:
+            self.toggle_measurement_mode(measure_action.isChecked())
+        elif chosen == adapt_action:
+            self.start_canvas_auto_adapt()
+        elif chosen == clear_action:
+            self.clear_measurements()
+
+    def set_plot_channel_visible(self, path, plot_idx, visible):
+        active_paths = self.plot_active_paths[plot_idx]
+        if visible and path not in active_paths:
+            active_paths.append(path)
+        elif not visible and path in active_paths:
+            active_paths.remove(path)
+        if not any(path in paths for paths in self.plot_active_paths):
+            self._remove_sampled_path(path)
+        self.clear_measurements()
+        self.refresh_ui_channel_bar()
         self.restart_sampling_thread()
+
+    def _remove_sampled_path(self, path):
+        if path not in self.ch_paths:
+            return
+        with QMutexLocker(self.buffer_mutex):
+            if path not in self.ch_paths:
+                return
+            sample_idx = self.ch_paths.index(path)
+            self.ch_paths.pop(sample_idx)
+            self.ch_types.pop(sample_idx)
+            self.ch_addrs.pop(sample_idx)
+            self.ch_buffers.pop(sample_idx)
+            self.ch_time_stamps.pop(sample_idx)
+        for plot_idx, curves in enumerate(self.plot_curves_dict):
+            curve = curves.pop(path, None)
+            if curve is not None:
+                self.plot_widgets[plot_idx].removeItem(curve)
+
+    def _color_icon(self, color):
+        pixmap = QPixmap(14, 14)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color))
+        painter.drawEllipse(2, 2, 10, 10)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _curve_color(self, path):
+        color = self.curve_colors.get(path)
+        if color:
+            return color
+        saved = self.db.get_config(f"curve_color:{path}", "").strip()
+        if saved and QColor(saved).isValid():
+            color = QColor(saved).name()
+        else:
+            used = set(self.curve_colors.values())
+            color = next((candidate for candidate in self.curve_palette if candidate not in used), None)
+            if color is None:
+                color = self.curve_palette[len(self.curve_colors) % len(self.curve_palette)]
+            self.db.save_config(f"curve_color:{path}", color)
+        self.curve_colors[path] = color
+        return color
+
+    def _populate_curve_color_menu(self, menu, path):
+        current = self._curve_color(path)
+        for color, name in zip(self.curve_palette, self.curve_color_names):
+            action = menu.addAction(self._color_icon(color), name)
+            action.setCheckable(True)
+            action.setChecked(color.casefold() == current.casefold())
+            action.triggered.connect(
+                lambda _checked=False, variable=path, selected=color:
+                self.set_curve_color(variable, selected)
+            )
+
+    def set_curve_color(self, path, color):
+        normalized = QColor(color).name()
+        self.curve_colors[path] = normalized
+        self.db.save_config(f"curve_color:{path}", normalized)
+        for curves in self.plot_curves_dict:
+            curve = curves.get(path)
+            if curve is None:
+                continue
+            pen = QPen(QColor(normalized), 2.0)
+            pen.setCosmetic(True)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            curve.setPen(pen)
+        self.update_plot_canvas()
+
+    def _debug_scalar_items(self):
+        """Return watched scalar tree items grouped by their debug window."""
+        groups = []
+        for slot in sorted(self.debug_trees):
+            tree = self.debug_trees[slot]
+            items = []
+
+            def visit(item):
+                if item.childCount():
+                    for child_idx in range(item.childCount()):
+                        visit(item.child(child_idx))
+                    return
+                if "{结构体/数组}" not in item.text(2):
+                    items.append(item)
+
+            for top_idx in range(tree.topLevelItemCount()):
+                visit(tree.topLevelItem(top_idx))
+            if items:
+                groups.append((slot, self.debug_titles.get(slot, f"调试窗口 {slot + 1}"), items))
+        return groups
 
     def show_context_menu(self, pos):
         tree = self.sender()
@@ -2632,36 +2967,37 @@ class MCUStudioWindow(QMainWindow):
         path = item.data(0, Qt.ItemDataRole.UserRole)
         if not path: path = item.text(0)
         
-        menu = QMenu()
+        menu = RoundedMenu(self)
         menu.setStyleSheet(self.popup_menu_style)
-        bound_ch_idx = -1
-        for i in range(3):
-            if self.ch_paths[i] == path: bound_ch_idx = i; break
-
         is_container = "{结构体/数组}" in item.text(2)
+        channel_actions = []
         if not is_container:
-            if bound_ch_idx != -1:
-                menu.addAction(f"❌ 取消该变量在 通道 {bound_ch_idx+1} 的波形监视")
-            else:
-                m1 = menu.addAction("🟢 绑定至 示波器通道 1")
-                m2 = menu.addAction("🟡 绑定至 示波器通道 2")
-                m3 = menu.addAction("🔵 绑定至 示波器通道 3")
+            channel_menu = menu.addMenu("添加到波形通道")
+            for channel_idx, title in enumerate(("CH1", "CH2", "CH3")):
+                action = channel_menu.addAction(title)
+                action.setCheckable(True)
+                action.setChecked(path in self.plot_active_paths[channel_idx])
+                channel_actions.append(action)
+            color_menu = menu.addMenu("曲线颜色")
+            color_menu.setIcon(self._color_icon(self._curve_color(path)))
+            self._populate_curve_color_menu(color_menu, path)
             menu.addSeparator()
-            
-        m_del = menu.addAction("🗑️ 从监视列表中删除该整组变量及其全部子成员 (Delete)")
+
+        m_del = menu.addAction("删除整组变量及其子成员")
         act = menu.exec(tree.viewport().mapToGlobal(pos))
-        
-        if not is_container and bound_ch_idx != -1 and act and "取消" in act.text(): 
-            self.unbind_channel(bound_ch_idx)
-        elif not is_container and 'm1' in locals() and act == m1: self.bind_tree_item_to_channel(0, item)
-        elif not is_container and 'm2' in locals() and act == m2: self.bind_tree_item_to_channel(1, item)
-        elif not is_container and 'm3' in locals() and act == m3: self.bind_tree_item_to_channel(2, item)
+
+        if act in channel_actions:
+            target_plot = channel_actions.index(act)
+            if channel_actions[target_plot].isChecked():
+                self.bind_tree_item_to_channel(target_plot, item)
+            else:
+                self.set_plot_channel_visible(path, target_plot, False)
         elif act == m_del:
             root_item = item
             while root_item.parent(): root_item = root_item.parent()
             self.remove_variable_root(root_item, tree)
 
-    def bind_tree_item_to_channel(self, ch_idx, item):
+    def bind_tree_item_to_channel(self, plot_idx, item):
         path = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
         v_type = item.text(1)
         all_db_vars = {x[0]: (x[2], x[3]) for x in self.db.get_all_vars()}
@@ -2675,18 +3011,23 @@ class MCUStudioWindow(QMainWindow):
             if base_addr is None: return
             absolute_address = base_addr + offset
         
-        for i in range(3):
-            if self.ch_paths[i] == path: self.unbind_channel(i)
-        
         locker = QMutexLocker(self.buffer_mutex)
-        self.ch_paths[ch_idx] = path
-        self.ch_types[ch_idx] = v_type
-        self.ch_addrs[ch_idx] = hex(absolute_address)
-        self.ch_buffers[ch_idx] = []
-        self.ch_time_stamps[ch_idx] = []
-        if path not in self.plot_active_paths[ch_idx]: self.plot_active_paths[ch_idx].append(path)
+        if path in self.ch_paths:
+            sample_idx = self.ch_paths.index(path)
+            self.ch_types[sample_idx] = v_type
+            self.ch_addrs[sample_idx] = hex(absolute_address)
+        else:
+            self.ch_paths.append(path)
+            self.ch_types.append(v_type)
+            self.ch_addrs.append(hex(absolute_address))
+            self.ch_buffers.append([])
+            self.ch_time_stamps.append([])
+        if path not in self.plot_active_paths[plot_idx]:
+            self.plot_active_paths[plot_idx].append(path)
         del locker
 
+        self._curve_color(path)
+        self.clear_measurements()
         self.refresh_ui_channel_bar()
         self.reset_canvas_adapt_ranges()
         self.restart_sampling_thread()
@@ -2702,12 +3043,13 @@ class MCUStudioWindow(QMainWindow):
                         self.plot_widgets[p_idx].removeItem(self.plot_curves_dict[p_idx][path])
                         del self.plot_curves_dict[p_idx][path]
                     except: pass
-        self.ch_paths[ch_idx] = None
-        self.ch_types[ch_idx] = None
-        self.ch_addrs[ch_idx] = None
-        self.ch_buffers[ch_idx] = []
-        self.ch_time_stamps[ch_idx] = []
+        self.ch_paths.pop(ch_idx)
+        self.ch_types.pop(ch_idx)
+        self.ch_addrs.pop(ch_idx)
+        self.ch_buffers.pop(ch_idx)
+        self.ch_time_stamps.pop(ch_idx)
         del locker
+        self.clear_measurements()
         self.refresh_ui_channel_bar()
         self.reset_canvas_adapt_ranges()
         if restart:
@@ -2716,8 +3058,12 @@ class MCUStudioWindow(QMainWindow):
     def refresh_ui_channel_bar(self):
         labels = [self.lbl_ch1, self.lbl_ch2, self.lbl_ch3]
         for i in range(3):
-            labels[i].setText(f"CH{i+1}  {self.ch_paths[i]}" if self.ch_paths[i] else f"CH{i+1}  空闲")
-            labels[i].setToolTip(self.ch_paths[i] or "")
+            paths = self.plot_active_paths[i]
+            labels[i].setText(
+                f"CH{i+1}  空闲" if not paths
+                else (f"CH{i+1}  {paths[0]}" if len(paths) == 1 else f"CH{i+1}  {len(paths)} 条曲线")
+            )
+            labels[i].setToolTip("\n".join(paths))
 
     @staticmethod
     def format_channel_value(value):
@@ -2848,9 +3194,9 @@ class MCUStudioWindow(QMainWindow):
         # A waveform binding is global. Keep it alive while the same variable
         # still exists in another debug window.
         remaining_paths = {row[0] for row in self.db.get_all_vars()}
-        for channel_idx, path in enumerate(list(self.ch_paths)):
+        for path in list(self.ch_paths):
             if path in removed_paths and path not in remaining_paths:
-                self.unbind_channel(channel_idx, restart=False)
+                self.unbind_channel(self.ch_paths.index(path), restart=False)
 
         if tree:
             index = tree.indexOfTopLevelItem(root_item)
@@ -2859,7 +3205,10 @@ class MCUStudioWindow(QMainWindow):
         
     def restart_sampling_thread(self):
         if getattr(self, 'elf_reload_in_progress', False): return
-        self.stop_sampling_thread()
+        if not self.stop_sampling_thread():
+            self.sampling_restart_pending = True
+            return
+        self.sampling_restart_pending = False
         if self.backend_suspended:
             return
             
@@ -2871,11 +3220,13 @@ class MCUStudioWindow(QMainWindow):
             
         self.custom_hz_edit.setEnabled(hz_idx == 0)
         delay = 1.0 / hz
-        active_channels = {}
-        for i in range(3):
-            if self.ch_addrs[i]: active_channels[i] = (self.ch_addrs[i], self.ch_types[i], self.ch_paths[i])
+        active_channels = {
+            index: (self.ch_addrs[index], self.ch_types[index], path)
+            for index, path in enumerate(self.ch_paths)
+            if self.ch_addrs[index]
+        }
         if active_channels:
-            self.worker = HighSpeedSamplingWorker(
+            worker = HighSpeedSamplingWorker(
                 self.config,
                 active_channels,
                 delay,
@@ -2883,15 +3234,19 @@ class MCUStudioWindow(QMainWindow):
                 self.elf_db,
                 self.jlink_lock,
             )
-            self.worker.data_received.connect(self.handle_high_speed_data)
-            self.worker.start()
+            self.worker = worker
+            worker.data_received.connect(
+                lambda batch, source=worker: self.handle_high_speed_data(batch)
+                if source is self.worker else None
+            )
+            worker.start()
 
     def stop_sampling_thread(self, wait_ms=250):
-        self._stop_low_speed_worker(wait_ms)
+        low_speed_stopped = self._stop_low_speed_worker(wait_ms)
         worker = getattr(self, 'worker', None)
         self.worker = None
         if not worker:
-            return True
+            return low_speed_stopped
         stopped = worker.stop(wait_ms)
         if not stopped:
             # Keep ownership until the blocked driver call returns.  This is
@@ -2900,7 +3255,7 @@ class MCUStudioWindow(QMainWindow):
             worker.finished.connect(lambda w=worker: self._forget_retired_worker(w))
         else:
             worker.deleteLater()
-        return stopped
+        return stopped and low_speed_stopped
 
     def _stop_low_speed_worker(self, wait_ms=250):
         worker = self.low_speed_worker
@@ -2913,9 +3268,7 @@ class MCUStudioWindow(QMainWindow):
         except (TypeError, RuntimeError):
             pass
         stopped = worker.stop(wait_ms)
-        if stopped:
-            worker.deleteLater()
-        else:
+        if not stopped:
             self.retired_workers.append(worker)
             worker.finished.connect(lambda w=worker: self._forget_retired_worker(w))
         return stopped
@@ -2924,6 +3277,9 @@ class MCUStudioWindow(QMainWindow):
         if worker in self.retired_workers:
             self.retired_workers.remove(worker)
         worker.deleteLater()
+        if (self.sampling_restart_pending and not self.backend_suspended
+                and not any(item.isRunning() for item in self.retired_workers)):
+            QTimer.singleShot(0, self.restart_sampling_thread)
 
     def low_speed_tree_refresh(self):
         if self.layout_switching or self.backend_suspended:
@@ -2939,15 +3295,19 @@ class MCUStudioWindow(QMainWindow):
         with QMutexLocker(self.buffer_mutex):
             channel_values = [values[-1] if values else None for values in self.ch_buffers]
         connected = self.config.backend_mode == "JLINK" or self.openocd_link_alive
-        for index, path in enumerate(self.ch_paths):
-            if path:
-                value = channel_values[index]
-                labels[index].setText(
-                    f"CH{index + 1}: {self.format_channel_value(value)}" if value is not None and connected
-                    else f"CH{index + 1}: 断开"
-                )
+        for plot_idx, paths in enumerate(self.plot_active_paths):
+            if not paths:
+                labels[plot_idx].setText(f"CH{plot_idx + 1}  空闲")
+            elif len(paths) > 1:
+                labels[plot_idx].setText(f"CH{plot_idx + 1}  {len(paths)} 条曲线")
             else:
-                labels[index].setText(f"CH{index + 1}  空闲")
+                sample_idx = self.ch_paths.index(paths[0]) if paths[0] in self.ch_paths else -1
+                value = channel_values[sample_idx] if sample_idx >= 0 else None
+                labels[plot_idx].setText(
+                    f"CH{plot_idx + 1}: {self.format_channel_value(value)}"
+                    if value is not None and connected else f"CH{plot_idx + 1}: 断开"
+                )
+            labels[plot_idx].setToolTip("\n".join(paths))
 
         if self.low_speed_worker:
             return
@@ -2972,11 +3332,11 @@ class MCUStudioWindow(QMainWindow):
             if not rect.isValid() or rect.bottom() < 0 or rect.top() > tree.viewport().height():
                 return
 
-            for channel_index, channel_path in enumerate(self.ch_paths):
-                if channel_path == path:
-                    value = channel_values[channel_index]
-                    item.setText(2, f"{value:.4f}" if value is not None and connected else "断开")
-                    return
+            if path in self.ch_paths:
+                channel_index = self.ch_paths.index(path)
+                value = channel_values[channel_index]
+                item.setText(2, f"{value:.4f}" if value is not None and connected else "断开")
+                return
 
             tab_vars = db_vars_by_tab.get(t_idx, {})
             if path not in tab_vars:
@@ -3016,6 +3376,7 @@ class MCUStudioWindow(QMainWindow):
             self,
         )
         self.low_speed_worker.finished_signal.connect(self._finish_low_speed_read)
+        self.low_speed_worker.finished.connect(self.low_speed_worker.deleteLater)
         self.low_speed_worker.start()
 
     @staticmethod
@@ -3036,8 +3397,6 @@ class MCUStudioWindow(QMainWindow):
         self.low_speed_worker = None
         pending = self.low_speed_pending
         self.low_speed_pending = {}
-        if worker:
-            worker.deleteLater()
         for (_tab_index, path), (item, read_key, type_info, v_type) in pending.items():
             if path in self.ch_paths:
                 continue
@@ -3136,7 +3495,22 @@ class MCUStudioWindow(QMainWindow):
         if hasattr(self, "detached_debug_windows"):
             self.detached_debug_windows.clear()
         self.backend_suspended = True
-        self.stop_sampling_thread()
+        self.stop_sampling_thread(wait_ms=1200)
+        running_threads = {
+            thread for thread in self.findChildren(QThread)
+            if thread.isRunning()
+        }
+        running_threads.update(
+            thread for thread in self.retired_workers
+            if thread.isRunning()
+        )
+        if running_threads:
+            self.lbl_status_text.setText("正在安全停止后台通信，请稍候…")
+            event.ignore()
+            if not getattr(self, "_close_retry_scheduled", False):
+                self._close_retry_scheduled = True
+                QTimer.singleShot(250, self._retry_close_after_workers)
+            return
         if self.tcl_socket:
             try: self.tcl_socket.close()
             except: pass
@@ -3151,6 +3525,10 @@ class MCUStudioWindow(QMainWindow):
         if app is not None:
             app.removeEventFilter(self)
         event.accept()
+
+    def _retry_close_after_workers(self):
+        self._close_retry_scheduled = False
+        self.close()
 
 
 def run_application() -> int:

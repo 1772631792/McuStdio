@@ -54,7 +54,9 @@ def validate_compilation() -> None:
 
 
 def validate_imports_and_elf_helpers() -> None:
+    import numpy as np
     import mcu_studio.core as core
+    import mcu_studio.spectrum as spectrum
     import mcu_studio.ui as ui
     import mcu_studio.workers as workers
 
@@ -69,6 +71,33 @@ def validate_imports_and_elf_helpers() -> None:
         "flash and background ELF workers import",
     )
     check(workers.OpenOcdFlashWorker.__name__ == "OpenOcdFlashWorker", "OpenOCD flash worker imports")
+    fft_size = 2048
+    fft_rate = 1024.0
+    fft_time = np.arange(fft_size, dtype=float) / fft_rate
+    fft_signal = (2.0 * np.sin(2.0 * np.pi * 32.0 * fft_time)
+                  + 0.2 * np.sin(2.0 * np.pi * 64.0 * fft_time)
+                  + 0.1 * np.sin(2.0 * np.pi * 96.0 * fft_time))
+    fft_result = spectrum.analyze_spectrum(
+        fft_time * 1000.0,
+        fft_signal,
+        {
+            "fft_size": fft_size,
+            "window": "flattop",
+            "fundamental_min_hz": 28.0,
+            "fundamental_max_hz": 36.0,
+            "harmonic_count": 5,
+            "harmonic_search_bins": 1,
+        },
+    )
+    check(
+        fft_result["ok"]
+        and abs(fft_result["fundamental_frequency_hz"] - 32.0) < 0.1
+        and abs(fft_result["fundamental_amplitude"] - 2.0) < 0.03
+        and abs(fft_result["harmonics"][1]["percent"] - 10.0) < 0.3
+        and abs(fft_result["harmonics"][2]["percent"] - 5.0) < 0.3
+        and abs(fft_result["thd_percent"] - math.sqrt(125.0)) < 0.5,
+        "FFT corrects window gain and reports fundamental, harmonics and THD",
+    )
     check(
         workers.LowSpeedReadWorker.__name__ == "LowSpeedReadWorker"
         and workers.BackendReconnectWorker.__name__ == "BackendReconnectWorker",
@@ -234,6 +263,14 @@ def validate_imports_and_elf_helpers() -> None:
             target_values == ["stm32f1x.cfg", "stm32f2x.cfg", "stm32f3x.cfg", "stm32f4x.cfg", "stm32h7x.cfg"],
             "OpenOCD target dropdown contains STM32 F1-F4 and H7",
         )
+        check(
+            login.jlink_dir_edit.isEditable()
+            and login.openocd_edit.isEditable()
+            and login.jlink_dir_edit.count() >= 1
+            and login.openocd_edit.count() >= 1
+            and login.discovery_worker is None,
+            "debugger dropdowns load remembered paths without scanning at startup",
+        )
         hinted = login._friendly_openocd_error(
             "LIBUSB_ERROR_NOT_SUPPORTED\nError: No J-Link device found"
         )
@@ -283,11 +320,23 @@ def validate_imports_and_elf_helpers() -> None:
 
         check(studio.tab_widget.count() == 3, "three fixed debug windows are created")
         check(studio.debug_trees[0].headerItem().text(0) == "全局变量", "debug variable column uses the compact title")
+        studio.centralWidget().layout().activate()
+        application.processEvents()
         check(
-            studio.top_bar.height() < 60
-            and studio.plot_toolbar_widget.height() == 40
-            and studio.centralWidget().layout().stretch(1) == 1,
-            "toolbars stay compact while the workspace receives all spare height",
+            studio.top_bar.height() < 60 and studio.plot_toolbar_widget.height() == 40,
+            f"toolbars stay compact (top {studio.top_bar.height()} px, plot {studio.plot_toolbar_widget.height()} px)",
+        )
+        check(
+            studio.centralWidget().layout().stretch(1) == 1,
+            "workspace receives all spare vertical height",
+        )
+        check(
+            studio.btn_back_config.objectName() == "backConfigButton"
+            and studio.btn_back_config.width() == 38
+            and studio.btn_back_config.mapTo(studio.top_bar, QPoint(0, 0)).x()
+                < studio.btn_disconnect.mapTo(studio.top_bar, QPoint(0, 0)).x()
+            and "不会向 MCU 发送复位" in studio.btn_back_config.toolTip(),
+            "compact return icon sits beside Disconnect without resetting the target",
         )
         float_profile = ui.automatic_slider_profile(12.5, {"kind": "scalar", "size": 4, "encoding": 0x04}, "float")
         int_profile = ui.automatic_slider_profile(100, {"kind": "scalar", "size": 1, "encoding": 0x07}, "uint8_t")
@@ -431,6 +480,42 @@ def validate_imports_and_elf_helpers() -> None:
             and not studio.plot_widgets[0].getPlotItem().menuEnabled(),
             "waveforms use an automatic color palette without pyqtgraph menus",
         )
+        fft_time_ms = (np.arange(512, dtype=float) / 512.0 * 1000.0).tolist()
+        studio.ch_paths = ["fft.signal"]
+        studio.ch_types = ["float"]
+        studio.ch_addrs = ["0x20000000"]
+        studio.ch_time_stamps = [fft_time_ms]
+        studio.ch_buffers = [[float(value) for value in np.sin(2.0 * np.pi * 16.0 * np.arange(512) / 512.0)]]
+        studio.plot_active_paths[0] = ["fft.signal"]
+        studio.fft_settings[0].update({
+            "fft_size": 512,
+            "fundamental_min_hz": 12.0,
+            "fundamental_max_hz": 20.0,
+        })
+        studio.is_frozen = True
+        studio.set_plot_mode(0, "fft")
+        studio.fft_last_update[0] = 0.0
+        studio._update_fft_plot(0)
+        check(
+            studio.plot_modes[0] == "fft"
+            and studio.fft_results[0]["fft.signal"]["ok"]
+            and studio.fft_summary_items[0].isVisible()
+            and studio.plot_widgets[0].getAxis("bottom").labelText == "频率 (Hz)",
+            "waveform context mode renders persisted FFT spectrum and harmonic summary",
+        )
+        fft_harmonic = studio.fft_results[0]["fft.signal"]["harmonics"][0]
+        fft_scene_point = studio.plot_widgets[0].getViewBox().mapViewToScene(QPointF(
+            fft_harmonic["frequency_hz"], fft_harmonic["percent"]
+        ))
+        studio.handle_plot_mouse_move(fft_scene_point, 0)
+        check(
+            studio.hover_dots[0].isVisible()
+            and studio.hover_labels[0].isVisible()
+            and "H1" in studio.hover_labels[0].toPlainText(),
+            "frozen FFT hover identifies spectral bins and harmonic percentages",
+        )
+        studio.set_plot_mode(0, "time")
+        studio.is_frozen = False
         studio.toggle_measurement_mode(True)
         studio.ch_paths = ["measure.first", "measure.second"]
         studio.ch_types = ["float", "float"]
@@ -704,7 +789,15 @@ def validate_imports_and_elf_helpers() -> None:
         shutdown_thread = BriefShutdownThread(studio)
         shutdown_thread.finished.connect(shutdown_thread.deleteLater)
         shutdown_thread.start()
-        studio.close()
+        safely_closed_links = []
+        class FakeJLink:
+            def close(self):
+                safely_closed_links.append(True)
+        studio.jlink_native_instance = FakeJLink()
+        studio.variable_write_worker.update_jlink(studio.jlink_native_instance)
+        close_destinations = []
+        studio.session_closed.connect(close_destinations.append)
+        studio.return_to_configuration()
         application.processEvents()
         check(
             studio.isVisible() and shutdown_thread.isRunning(),
@@ -713,8 +806,10 @@ def validate_imports_and_elf_helpers() -> None:
         QTest.qWait(700)
         application.processEvents()
         check(
-            not studio.isVisible(),
-            "window closes automatically after background QThreads finish",
+            not studio.isVisible()
+            and close_destinations == ["config"]
+            and safely_closed_links == [True],
+            "window safely returns to configuration after background QThreads finish",
         )
         test_database.conn.close()
 
@@ -760,6 +855,7 @@ def validate_openocd_configuration() -> None:
         discover_openocd_configs,
         launch_openocd,
         resolve_openocd_config,
+        scan_debugger_installations,
         validate_openocd_config,
     )
 
@@ -792,6 +888,19 @@ def validate_openocd_configuration() -> None:
             discover_openocd_executables(str(preferred_openocd))[0] == str(preferred_openocd)
             and discover_jlink_directories(str(preferred_jlink))[0] == str(preferred_jlink),
             "persisted debugger paths take priority over automatic discovery",
+        )
+        nested_tools = discovery_root / "custom" / "embedded" / "tools"
+        nested_tools.mkdir(parents=True)
+        global_openocd = nested_tools / "openocd.exe"
+        global_openocd.touch()
+        global_jlink = nested_tools / "SEGGER"
+        global_jlink.mkdir()
+        (global_jlink / dll_name).touch()
+        with patch("mcu_studio.core.fixed_drive_roots", return_value=[str(discovery_root)]):
+            scanned_jlink, scanned_openocd = scan_debugger_installations()
+        check(
+            str(global_jlink) in scanned_jlink and str(global_openocd) in scanned_openocd,
+            "background global scan finds debugger installations outside common paths",
         )
     result = subprocess.run(
         [config.openocd_exe, *args, "-c", "shutdown"],

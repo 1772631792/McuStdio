@@ -21,6 +21,7 @@ from .core import (
     jlink_dll_path,
     launch_openocd,
     receive_tcl_response,
+    scan_debugger_installations,
     scalar_size,
     stop_managed_openocd,
     validate_openocd_config,
@@ -30,6 +31,29 @@ try:
     import pylink
 except ImportError:
     pylink = None
+
+
+class DebuggerDiscoveryWorker(QThread):
+    """Search fixed disks for debugger installations without blocking Qt."""
+
+    progress_signal = pyqtSignal(object, object, int, str)
+    finished_signal = pyqtSignal(object, object)
+
+    def run(self):
+        def report(jlink_paths, openocd_paths, visited, drive):
+            if not self.isInterruptionRequested():
+                self.progress_signal.emit(jlink_paths, openocd_paths, visited, drive)
+
+        jlink_paths, openocd_paths = scan_debugger_installations(
+            stop_requested=self.isInterruptionRequested,
+            progress=report,
+        )
+        if not self.isInterruptionRequested():
+            self.finished_signal.emit(jlink_paths, openocd_paths)
+
+    def stop(self, wait_ms=1200):
+        self.requestInterruption()
+        return self.wait(max(0, int(wait_ms)))
 
 
 class ElfParseWorker(QThread):

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import string
 from pathlib import Path
 from typing import Any, Dict
 
@@ -164,6 +165,70 @@ def discover_openocd_executables(preferred="", current=""):
             raise FileNotFoundError(executable)
 
     return _unique_existing_paths(candidates, validate)
+
+
+def fixed_drive_roots():
+    """Return local fixed-drive roots without touching network volumes."""
+    if sys.platform != "win32":
+        return [os.path.abspath(os.sep)]
+    try:
+        import ctypes
+        drive_type = ctypes.windll.kernel32.GetDriveTypeW
+        return [
+            f"{letter}:\\" for letter in string.ascii_uppercase
+            if os.path.isdir(f"{letter}:\\") and drive_type(f"{letter}:\\") == 3
+        ]
+    except (AttributeError, OSError):
+        return [f"{letter}:\\" for letter in string.ascii_uppercase if os.path.isdir(f"{letter}:\\")]
+
+
+def scan_debugger_installations(stop_requested=None, progress=None):
+    """Search fixed disks for OpenOCD and J-Link from a background thread."""
+    stop_requested = stop_requested or (lambda: False)
+    openocd_paths = []
+    jlink_paths = []
+    openocd_seen = set()
+    jlink_seen = set()
+    skipped_names = {
+        "$recycle.bin", "system volume information", "windows", "winsxs",
+        "node_modules", ".git", "__pycache__", ".cache", "temp", "tmp",
+    }
+    visited = 0
+    last_report = 0
+    for drive in fixed_drive_roots():
+        for root, directories, filenames in os.walk(drive, topdown=True, followlinks=False):
+            if stop_requested():
+                return jlink_paths, openocd_paths
+            directories[:] = [
+                name for name in directories
+                if name.casefold() not in skipped_names and not name.startswith("$Windows.~")
+            ]
+            visited += 1
+            lower_files = {name.casefold(): name for name in filenames}
+            openocd_name = lower_files.get("openocd.exe")
+            if openocd_name:
+                candidate = os.path.normpath(os.path.join(root, openocd_name))
+                key = os.path.normcase(candidate)
+                if key not in openocd_seen:
+                    openocd_seen.add(key)
+                    openocd_paths.append(candidate)
+            if "jlink_x64.dll" in lower_files or "jlinkarm.dll" in lower_files:
+                candidate = os.path.normpath(root)
+                key = os.path.normcase(candidate)
+                if key not in jlink_seen:
+                    try:
+                        jlink_dll_path(candidate)
+                    except (OSError, ValueError):
+                        pass
+                    else:
+                        jlink_seen.add(key)
+                        jlink_paths.append(candidate)
+            if progress and (visited - last_report >= 2500 or openocd_name):
+                last_report = visited
+                progress(list(jlink_paths), list(openocd_paths), visited, drive)
+    if progress:
+        progress(list(jlink_paths), list(openocd_paths), visited, "")
+    return jlink_paths, openocd_paths
 
 
 def resolve_openocd_config(executable, value, subfolder):
@@ -630,7 +695,6 @@ class ProjectConfig:
         self.jlink_dll_dir = ""        
         self.jlink_device = "Cortex-M0+" 
         self.jlink_connect_device = "Cortex-M0+"
-        self.svd_path = ""             
         self.openocd_host = "127.0.0.1"
         self.tcl_port = 6666
         self.show_log_window = False  

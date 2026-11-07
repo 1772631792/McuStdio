@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 import bisect
 import math
 import threading
+import html
 import numpy as np 
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -19,7 +20,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHeaderView, QMenu, QMessageBox as _QMessageBox, QDialog, QFileDialog,
                              QFormLayout, QCheckBox as _QCheckBox, QSplitter, QTextEdit,
                              QRadioButton, QButtonGroup, QTabWidget, QFrame, QTabBar,
-                             QStyle, QStyleOptionButton, QProgressBar, QSlider, QScrollArea)
+                             QStyle, QStyleOptionButton, QProgressBar, QSlider, QScrollArea,
+                             QSpinBox)
 from PyQt6.QtCore import (QTimer, Qt, QEvent, pyqtSignal, QVariantAnimation, QMutex,
                           QMutexLocker, QPointF, QRectF, QSize, QThread, QEventLoop)
 from PyQt6.QtGui import (QFont, QKeyEvent, QIntValidator, QDoubleValidator, QColor,
@@ -47,9 +49,12 @@ from .core import (
     type_label,
     validate_openocd_config,
 )
-from .workers import (BackendCloseWorker, BackendReconnectWorker, ElfFlashWorker, ElfParseWorker,
+from .workers import (BackendCloseWorker, BackendReconnectWorker, DebuggerDiscoveryWorker,
+                      ElfFlashWorker, ElfParseWorker,
                       HighSpeedSamplingWorker, LowSpeedReadWorker, OpenOcdFlashWorker,
                       SampleHistoryWriter, VariableWriteWorker)
+from .spectrum import (DEFAULT_FFT_SETTINGS, WINDOW_LABELS, analyze_spectrum,
+                       normalize_fft_settings, spectrum_display_values)
 
 pg.setConfigOptions(useOpenGL=False, antialias=True)
 
@@ -196,6 +201,28 @@ class HighContrastComboBox(_QComboBox):
 QComboBox = HighContrastComboBox
 
 
+class PathComboBox(HighContrastComboBox):
+    """Editable path selector that keeps the old line-edit call surface."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(_QComboBox.InsertPolicy.NoInsert)
+        self.setSizeAdjustPolicy(_QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.setMinimumContentsLength(24)
+
+    def text(self):
+        return self.currentText()
+
+    def setText(self, value):
+        value = str(value or "")
+        index = self.findText(value, Qt.MatchFlag.MatchFixedString)
+        if index >= 0:
+            self.setCurrentIndex(index)
+        else:
+            self.setEditText(value)
+
+
 class HighContrastCheckBox(_QCheckBox):
     """Keep the checked state visible with every platform and application theme."""
 
@@ -269,6 +296,9 @@ DARK_STYLE = """
     QPushButton:disabled { background-color: #1d1d1d; color: #626262; border-color: #2a2a2a; }
     QPushButton#primaryButton { background-color: #0e639c; border-color: #0e639c; color: #ffffff; font-weight: 700; }
     QPushButton#primaryButton:hover { background-color: #1177bb; }
+    QPushButton#backConfigButton { background-color: #252a32; border: 1px solid #465264; color: #d8e8f8; border-radius: 9px; padding: 0px; }
+    QPushButton#backConfigButton:hover { background-color: #2e4058; border-color: #5b8fc4; color: #ffffff; }
+    QPushButton#backConfigButton:pressed { background-color: #20344c; }
     QPushButton#warningButton { background-color: #ff9f0a; border-color: #ff9f0a; color: #1c1c1e; }
     QPushButton#warningButton:hover { background-color: #ffb340; }
     QPushButton#dangerButton { background-color: #ff453a; border-color: #ff453a; color: #ffffff; }
@@ -337,6 +367,9 @@ LIGHT_STYLE = """
     QPushButton:disabled { background-color: #f1f5f9; color: #94a3b8; border: 1px solid #e2e8f0; }
     QPushButton#primaryButton { background-color: #007aff; border-color: #007aff; color: #ffffff; font-weight: 700; }
     QPushButton#primaryButton:hover { background-color: #2188ff; }
+    QPushButton#backConfigButton { background-color: #f7faff; border: 1px solid #b9cbe0; color: #24557f; border-radius: 9px; padding: 0px; }
+    QPushButton#backConfigButton:hover { background-color: #e8f2ff; border-color: #7aaee0; color: #123d63; }
+    QPushButton#backConfigButton:pressed { background-color: #dcecff; }
     QPushButton#warningButton { background-color: #ff9500; border-color: #ff9500; color: #ffffff; }
     QPushButton#dangerButton { background-color: #ff3b30; border-color: #ff3b30; color: #ffffff; }
     QFrame#actionStrip { background-color: transparent; border: 0; }
@@ -960,11 +993,13 @@ class JLinkDeviceDialog(QDialog):
         self.accept()
 
 class LoginConfigDialog(QDialog):
-    def __init__(self, db):
+    def __init__(self, db, enable_global_discovery=True):
         super().__init__()
         self.db = db
         self.config = ProjectConfig()
         self.is_connected = False
+        self.discovery_worker = None
+        self.enable_global_discovery = bool(enable_global_discovery)
         self.setWindowTitle(f"MCU Live Watch Studio V{__version__}")
         self.resize(780, 620)
         self.init_ui()
@@ -1010,11 +1045,15 @@ class LoginConfigDialog(QDialog):
         form.addRow("后端类型", self.driver_mode_combo)
 
         self.lbl_jl_dir = QLabel("J-Link 安装目录")
-        self.jlink_dir_edit = QLineEdit()
+        self.jlink_dir_edit = PathComboBox()
+        self.jlink_dir_edit.activated.connect(lambda _index: self.static_env_check())
+        self.jlink_dir_edit.lineEdit().editingFinished.connect(self.static_env_check)
         self.btn_jl_dir = QPushButton("浏览…")
         self.btn_jl_dir.clicked.connect(self.select_jlink_dir)
-        self.btn_detect_jlink = QPushButton("自动查找")
-        self.btn_detect_jlink.setToolTip("优先采用数据库已保存的 J-Link，再搜索注册表、PATH 和常见安装目录")
+        self.btn_detect_jlink = QPushButton("扫描电脑")
+        self.btn_detect_jlink.setProperty("commandButton", True)
+        self.btn_detect_jlink.setMinimumWidth(92)
+        self.btn_detect_jlink.setToolTip("立即检测常见位置，并在后台扫描本机所有固定磁盘")
         self.btn_detect_jlink.clicked.connect(self.auto_detect_jlink)
         self.h_jl_dir = QHBoxLayout(); self.h_jl_dir.addWidget(self.jlink_dir_edit); self.h_jl_dir.addWidget(self.btn_jl_dir); self.h_jl_dir.addWidget(self.btn_detect_jlink)
 
@@ -1025,28 +1064,19 @@ class LoginConfigDialog(QDialog):
         self.btn_jl_device.clicked.connect(self.open_jlink_device_selector)
         self.h_jl_device = QHBoxLayout(); self.h_jl_device.addWidget(self.jlink_device_edit); self.h_jl_device.addWidget(self.btn_jl_device)
 
-        self.lbl_jl_svd = QLabel("SVD（可选）")
-        self.svd_edit = QLineEdit()
-        self.svd_edit.setPlaceholderText("可留空：不影响 ELF 烧录、DWARF 变量或波形调试")
-        self.svd_edit.setToolTip("SVD 只描述外设寄存器名称/位域；J-Link Flash 算法来自所选 DLL/XML，与 SVD 无关。")
-        self.btn_svd = QPushButton("浏览…")
-        self.btn_svd.clicked.connect(lambda: self.select_file(self.svd_edit, "选择外设 SVD 描述文件", "SVD Files (*.svd *.txt)"))
-        self.btn_clear_svd = QPushButton("清空")
-        self.btn_clear_svd.setToolTip("清除上一颗芯片遗留的 SVD；不影响烧录和调试")
-        self.btn_clear_svd.clicked.connect(self.svd_edit.clear)
-        self.h_jl_svd = QHBoxLayout(); self.h_jl_svd.addWidget(self.svd_edit); self.h_jl_svd.addWidget(self.btn_svd); self.h_jl_svd.addWidget(self.btn_clear_svd)
-
         form.addRow(self.lbl_jl_dir, self.h_jl_dir)
         form.addRow(self.lbl_jl_dev, self.h_jl_device)
-        form.addRow(self.lbl_jl_svd, self.h_jl_svd)
 
         self.lbl_ocd_exe = QLabel("OpenOCD 程序")
-        self.openocd_edit = QLineEdit()
-        self.openocd_edit.editingFinished.connect(self.refresh_openocd_cfgs)
+        self.openocd_edit = PathComboBox()
+        self.openocd_edit.activated.connect(lambda _index: self.refresh_openocd_cfgs())
+        self.openocd_edit.lineEdit().editingFinished.connect(self.refresh_openocd_cfgs)
         self.btn_ocd = QPushButton("浏览…")
         self.btn_ocd.clicked.connect(self.select_openocd_executable)
-        self.btn_detect_openocd = QPushButton("自动查找")
-        self.btn_detect_openocd.setToolTip("优先采用数据库已保存的 OpenOCD，再搜索随程序版本、PATH 和常见安装目录")
+        self.btn_detect_openocd = QPushButton("扫描电脑")
+        self.btn_detect_openocd.setProperty("commandButton", True)
+        self.btn_detect_openocd.setMinimumWidth(92)
+        self.btn_detect_openocd.setToolTip("立即检测常见位置，并在后台扫描本机所有固定磁盘")
         self.btn_detect_openocd.clicked.connect(self.auto_detect_openocd)
         self.h_ocd_exe = QHBoxLayout(); self.h_ocd_exe.addWidget(self.openocd_edit); self.h_ocd_exe.addWidget(self.btn_ocd); self.h_ocd_exe.addWidget(self.btn_detect_openocd)
 
@@ -1106,10 +1136,6 @@ class LoginConfigDialog(QDialog):
         self.btn_detect_jlink.setEnabled(is_jlink)
         self.jlink_device_edit.setEnabled(is_jlink)
         self.btn_jl_device.setEnabled(is_jlink)
-        self.svd_edit.setEnabled(is_jlink)
-        self.btn_svd.setEnabled(is_jlink)
-        self.btn_clear_svd.setEnabled(is_jlink)
-
         self.openocd_edit.setEnabled(not is_jlink)
         self.btn_ocd.setEnabled(not is_jlink)
         self.btn_detect_openocd.setEnabled(not is_jlink)
@@ -1220,23 +1246,119 @@ class LoginConfigDialog(QDialog):
         path, _ = QFileDialog.getOpenFileName(self, title, "", flt)
         if path: edit.setText(os.path.normpath(path))
 
+    @staticmethod
+    def _cached_path_list(raw_value):
+        try:
+            values = json.loads(raw_value or "[]")
+        except (TypeError, ValueError):
+            values = []
+        return [str(value) for value in values if isinstance(value, str) and value.strip()]
+
+    @staticmethod
+    def _merge_path_choices(combo, paths, selected=None):
+        current = str(selected if selected is not None else combo.currentText()).strip()
+        candidates = [current]
+        candidates.extend(combo.itemText(index) for index in range(combo.count()))
+        candidates.extend(paths)
+        unique = []
+        seen = set()
+        for candidate in candidates:
+            if not candidate:
+                continue
+            normalized = os.path.normpath(os.path.abspath(os.path.expandvars(candidate)))
+            key = os.path.normcase(normalized)
+            if key not in seen:
+                seen.add(key)
+                unique.append(normalized)
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(unique)
+        if current:
+            normalized_current = os.path.normpath(os.path.abspath(os.path.expandvars(current)))
+            index = combo.findText(normalized_current, Qt.MatchFlag.MatchFixedString)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+        elif combo.count():
+            combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def start_global_discovery(self):
+        if self.discovery_worker and self.discovery_worker.isRunning():
+            return
+        worker = DebuggerDiscoveryWorker(self)
+        self.discovery_worker = worker
+        worker.progress_signal.connect(self._global_discovery_progress)
+        worker.finished_signal.connect(self._global_discovery_finished)
+        worker.finished.connect(lambda source=worker: self._global_discovery_stopped(source))
+        worker.start()
+        self.lbl_hardware_status.setText("已加载快速检测结果，正在后台扫描本机固定磁盘…")
+
+    def _global_discovery_progress(self, jlink_paths, openocd_paths, visited, drive):
+        self._merge_path_choices(self.jlink_dir_edit, jlink_paths)
+        self._merge_path_choices(self.openocd_edit, openocd_paths)
+        location = f" · {drive}" if drive else ""
+        self.lbl_hardware_status.setText(
+            f"正在扫描本机调试工具：{visited:,} 个目录{location} · "
+            f"J-Link {len(jlink_paths)} · OpenOCD {len(openocd_paths)}"
+        )
+
+    def _global_discovery_finished(self, jlink_paths, openocd_paths):
+        self._merge_path_choices(self.jlink_dir_edit, jlink_paths)
+        self._merge_path_choices(self.openocd_edit, openocd_paths)
+        combined_jlink = [self.jlink_dir_edit.itemText(i) for i in range(self.jlink_dir_edit.count())]
+        combined_openocd = [self.openocd_edit.itemText(i) for i in range(self.openocd_edit.count())]
+        self.db.save_config("discovered_jlink_paths", json.dumps(combined_jlink, ensure_ascii=False))
+        self.db.save_config("discovered_openocd_paths", json.dumps(combined_openocd, ensure_ascii=False))
+        self.lbl_hardware_status.setText(
+            f"全机扫描完成：J-Link {len(combined_jlink)} 个，OpenOCD {len(combined_openocd)} 个；可在下拉框选择"
+        )
+        self.static_env_check()
+
+    def _global_discovery_stopped(self, worker):
+        if self.discovery_worker is worker:
+            self.discovery_worker = None
+        worker.deleteLater()
+
+    def stop_global_discovery(self):
+        worker = self.discovery_worker
+        if not worker:
+            return True
+        worker.requestInterruption()
+        stopped = worker.wait(1500)
+        if not stopped:
+            for signal in (worker.progress_signal, worker.finished_signal, worker.finished):
+                try:
+                    signal.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+            app = QApplication.instance()
+            if app is not None:
+                worker.setParent(app)
+            worker.finished.connect(worker.deleteLater)
+            self.discovery_worker = None
+        return stopped
+
     def select_openocd_executable(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择 openocd.exe", "", "Executable (*.exe)")
         if path:
-            self.openocd_edit.setText(os.path.normpath(path))
+            normalized = os.path.normpath(path)
+            self._merge_path_choices(self.openocd_edit, [normalized], normalized)
             self.refresh_openocd_cfgs()
 
     def auto_detect_openocd(self):
         saved = self.db.get_config("openocd_exe", "").strip()
+        cached = self._cached_path_list(self.db.get_config("discovered_openocd_paths", "[]"))
         matches = discover_openocd_executables(saved, self.openocd_edit.text().strip())
-        if not matches:
-            self.lbl_hardware_status.setText("未找到可用的 openocd.exe，请手动浏览选择")
-            return
-        self.openocd_edit.setText(matches[0])
-        self.refresh_openocd_cfgs()
-        source = "数据库配置" if saved and os.path.normcase(matches[0]) == os.path.normcase(os.path.abspath(saved)) else "本机搜索"
-        self.lbl_hardware_status.setText(f"已从{source}找到 OpenOCD：{matches[0]}")
-        self.static_env_check()
+        matches.extend(path for path in cached if os.path.isfile(path) and path not in matches)
+        if matches:
+            self._merge_path_choices(self.openocd_edit, matches, matches[0])
+            self.refresh_openocd_cfgs()
+            source = "数据库配置" if saved and os.path.normcase(matches[0]) == os.path.normcase(os.path.abspath(saved)) else "本机搜索"
+            self.lbl_hardware_status.setText(f"已从{source}找到 OpenOCD：{matches[0]}")
+            self.static_env_check()
+        else:
+            self.lbl_hardware_status.setText("快速检测未找到 OpenOCD，正在扫描本机固定磁盘…")
+        if self.enable_global_discovery:
+            self.start_global_discovery()
 
     def refresh_openocd_cfgs(self):
         """Show common cfg choices; the browse buttons cover every other cfg."""
@@ -1274,19 +1396,30 @@ class LoginConfigDialog(QDialog):
     def select_jlink_dir(self):
         path = QFileDialog.getExistingDirectory(self, "选择 SEGGER J-Link 安装根目录")
         if path: 
-            self.jlink_dir_edit.setText(os.path.normpath(path))
+            normalized = os.path.normpath(path)
+            self._merge_path_choices(self.jlink_dir_edit, [normalized], normalized)
             self.static_env_check()
 
     def auto_detect_jlink(self):
         saved = self.db.get_config("jlink_dll_dir", "").strip()
+        cached = self._cached_path_list(self.db.get_config("discovered_jlink_paths", "[]"))
         matches = discover_jlink_directories(saved, self.jlink_dir_edit.text().strip())
-        if not matches:
-            self.lbl_hardware_status.setText("未找到匹配当前程序位数的 J-Link DLL，请安装 SEGGER J-Link Software")
-            return
-        self.jlink_dir_edit.setText(matches[0])
-        source = "数据库配置" if saved and os.path.normcase(matches[0]) == os.path.normcase(os.path.abspath(saved)) else "本机搜索"
-        self.lbl_hardware_status.setText(f"已从{source}找到 J-Link：{matches[0]}")
-        self.static_env_check()
+        for path in cached:
+            try:
+                jlink_dll_path(path)
+            except (OSError, ValueError):
+                continue
+            if path not in matches:
+                matches.append(path)
+        if matches:
+            self._merge_path_choices(self.jlink_dir_edit, matches, matches[0])
+            source = "数据库配置" if saved and os.path.normcase(matches[0]) == os.path.normcase(os.path.abspath(saved)) else "本机搜索"
+            self.lbl_hardware_status.setText(f"已从{source}找到 J-Link：{matches[0]}")
+            self.static_env_check()
+        else:
+            self.lbl_hardware_status.setText("快速检测未找到 J-Link，正在扫描本机固定磁盘…")
+        if self.enable_global_discovery:
+            self.start_global_discovery()
 
     def open_jlink_device_selector(self):
         dll_dir = self.jlink_dir_edit.text().strip()
@@ -1295,16 +1428,12 @@ class LoginConfigDialog(QDialog):
         dialog.exec()
 
     def apply_jlink_device_selection(self, display_name, connect_name):
-        previous_device = self.jlink_device_edit.text().strip()
         self.jlink_device_edit.setText(display_name)
         self.jlink_device_edit.setProperty("connect_device", connect_name)
         if connect_name != display_name:
             self.jlink_device_edit.setToolTip(f"XML 扩展器件；实时调试按内核 {connect_name} 连接")
         else:
             self.jlink_device_edit.setToolTip("")
-        if previous_device and previous_device.casefold() != display_name.casefold() and self.svd_edit.text().strip():
-            self.svd_edit.clear()
-            self.svd_edit.setPlaceholderText(f"已从 {previous_device} 切换到 {display_name}；旧 SVD 已清除（SVD 不影响烧录）")
 
     def select_cfg_file(self, combo, subfolder):
         exe_path = self.openocd_edit.text().strip()
@@ -1316,12 +1445,27 @@ class LoginConfigDialog(QDialog):
     def load_saved_config(self):
         self.elf_edit.setText(self.db.get_config("elf_path"))
         saved_openocd = self.db.get_config("openocd_exe", "").strip() or default_openocd_executable()
-        self.openocd_edit.setText(saved_openocd)
+        cached_openocd = self._cached_path_list(self.db.get_config("discovered_openocd_paths", "[]"))
+        remembered_openocd = [saved_openocd]
+        remembered_openocd.extend(path for path in cached_openocd if os.path.isfile(path))
+        bundled_openocd = default_openocd_executable()
+        if os.path.isfile(bundled_openocd):
+            remembered_openocd.append(bundled_openocd)
+        self._merge_path_choices(self.openocd_edit, remembered_openocd, saved_openocd)
         self.refresh_openocd_cfgs()
-        self.jlink_dir_edit.setText(self.db.get_config("jlink_dll_dir", "C:\\Program Files\\SEGGER\\JLink"))
+        saved_jlink = self.db.get_config("jlink_dll_dir", "C:\\Program Files\\SEGGER\\JLink")
+        cached_jlink = self._cached_path_list(self.db.get_config("discovered_jlink_paths", "[]"))
+        remembered_jlink = [saved_jlink]
+        for path in cached_jlink:
+            try:
+                jlink_dll_path(path)
+            except (OSError, ValueError):
+                continue
+            if path not in remembered_jlink:
+                remembered_jlink.append(path)
+        self._merge_path_choices(self.jlink_dir_edit, remembered_jlink, saved_jlink)
         self.jlink_device_edit.setText(self.db.get_config("jlink_device", "Cortex-M0+"))
         self.jlink_device_edit.setProperty("connect_device", self.db.get_config("jlink_connect_device", self.jlink_device_edit.text()))
-        self.svd_edit.setText(self.db.get_config("svd_path"))
         saved_theme = self.db.get_config("theme_mode", "DARK").upper()
         self.theme_combo.setCurrentIndex(1 if saved_theme == "LIGHT" else 0)
         self.apply_selected_theme()
@@ -1365,7 +1509,6 @@ class LoginConfigDialog(QDialog):
             self.config.jlink_dll_dir = os.path.dirname(jlink_dir) if os.path.isfile(jlink_dir) else jlink_dir
             self.config.jlink_device = self.jlink_device_edit.text().strip()
             self.config.jlink_connect_device = self.jlink_device_edit.property("connect_device") or self.config.jlink_device
-            self.config.svd_path = self.svd_edit.text().strip()
             try:
                 if pylink is None:
                     raise RuntimeError("缺少 pylink-square，请先安装依赖")
@@ -1389,10 +1532,15 @@ class LoginConfigDialog(QDialog):
             self.db.save_config("jlink_dll_dir", self.config.jlink_dll_dir)
             self.db.save_config("jlink_device", self.config.jlink_device)
             self.db.save_config("jlink_connect_device", self.config.jlink_connect_device)
-            self.db.save_config("svd_path", self.config.svd_path)
 
         self.is_connected = True
         self.accept()
+
+    def done(self, result):
+        if hasattr(self, "detect_timer"):
+            self.detect_timer.stop()
+        self.stop_global_discovery()
+        super().done(result)
 
 
 class InPlaceEditLineEdit(QLineEdit):
@@ -2088,13 +2236,18 @@ class VariableSliderDialog(QDialog):
 class MCUStudioWindow(QMainWindow):
     WORKSPACE_STATE_KEY = "workspace_state_v1"
     INLINE_SLIDER_STATE_KEY = "inline_slider_state_v1"
+    FFT_STATE_KEY = "fft_plot_state_v1"
     SLIDER_CONTROL_ROLE = int(Qt.ItemDataRole.UserRole) + 1
     variable_write_result = pyqtSignal(str, int, bool, str, object)
+    session_closed = pyqtSignal(str)
 
     def __init__(self, config, db):
         super().__init__()
         self.config = config
         self.db = db
+        self._close_destination = "exit"
+        self._session_closed_emitted = False
+        self._shutdown_jlink_started = False
         self.is_dark_theme = getattr(config, 'theme_mode', 'DARK').upper() == 'DARK'
         self.theme_colors = ({
             'plot_bg': '#111315', 'axis': '#4f5660', 'axis_text': '#aab2bd',
@@ -2174,6 +2327,22 @@ class MCUStudioWindow(QMainWindow):
         self.hover_last_point = [None, None, None]
         self.canvas_fixed_ranges = [None, None, None]
         self.plot_legend_corners = ["top-left", "top-left", "top-left"]
+        self.plot_modes = ["time", "time", "time"]
+        self.fft_settings = [dict(DEFAULT_FFT_SETTINGS) for _ in range(3)]
+        self.fft_last_update = [0.0, 0.0, 0.0]
+        self.fft_results = [{}, {}, {}]
+        try:
+            saved_fft_state = json.loads(self.db.get_config(self.FFT_STATE_KEY, "{}"))
+        except (TypeError, ValueError):
+            saved_fft_state = {}
+        if isinstance(saved_fft_state, dict):
+            saved_modes = saved_fft_state.get("modes", [])
+            saved_settings = saved_fft_state.get("settings", [])
+            for plot_idx in range(3):
+                if plot_idx < len(saved_modes) and saved_modes[plot_idx] in ("time", "fft"):
+                    self.plot_modes[plot_idx] = saved_modes[plot_idx]
+                if plot_idx < len(saved_settings):
+                    self.fft_settings[plot_idx] = normalize_fft_settings(saved_settings[plot_idx])
         self.tcl_socket = None
         self.heartbeat_state = False
         self.workspace_restore_in_progress = True
@@ -2594,6 +2763,7 @@ class MCUStudioWindow(QMainWindow):
 
         top_bar = QFrame()
         top_bar.setObjectName("topBar")
+        top_bar.setFixedHeight(52)
         self.top_bar = top_bar
         top = QHBoxLayout(top_bar)
         top.setContentsMargins(10, 7, 10, 7)
@@ -2649,6 +2819,20 @@ class MCUStudioWindow(QMainWindow):
         self.btn_flash.clicked.connect(self.flash_elf_by_user)
         self.btn_flash.setEnabled(True)
         self.btn_disconnect.setProperty("commandButton", True)
+
+        self.btn_back_config = QPushButton()
+        self.btn_back_config.setObjectName("backConfigButton")
+        self.btn_back_config.setFixedSize(38, 36)
+        back_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack)
+        if back_icon.isNull():
+            self.btn_back_config.setText("←")
+            self.btn_back_config.setFont(QFont("Segoe UI Symbol", 16, QFont.Weight.Bold))
+        else:
+            self.btn_back_config.setIcon(back_icon)
+            self.btn_back_config.setIconSize(QSize(18, 18))
+        self.btn_back_config.setAccessibleName("返回配置")
+        self.btn_back_config.setToolTip("安全停止当前采样并返回配置；不会向 MCU 发送复位或暂停命令")
+        self.btn_back_config.clicked.connect(self.return_to_configuration)
 
         sampling_caption = QLabel("采样")
         sampling_caption.setObjectName("fieldCaption")
@@ -2713,6 +2897,8 @@ class MCUStudioWindow(QMainWindow):
         top.addWidget(btn_add)
         top.addWidget(btn_adv_c)
         top.addStretch()
+        top.addWidget(self.btn_back_config)
+        top.addSpacing(6)
         top.addWidget(action_strip)
         layout.addWidget(top_bar)
         
@@ -2750,6 +2936,8 @@ class MCUStudioWindow(QMainWindow):
         self.mouse_move_proxies = []
         self.measurement_lines = []
         self.measurement_dots = []
+        self.fft_summary_items = []
+        self.fft_harmonic_markers = []
 
         for i in range(3):
             pw = pg.PlotWidget()
@@ -2776,6 +2964,26 @@ class MCUStudioWindow(QMainWindow):
             )
             legend.setVisible(False)
             self.plot_legends.append(legend)
+
+            fft_summary = pg.TextItem(
+                anchor=(1, 0),
+                color=self.theme_colors['axis_text'],
+                fill=pg.mkBrush(28, 28, 30, 225) if self.is_dark_theme else pg.mkBrush(255, 255, 255, 235),
+                border=pg.mkPen(self.theme_colors['panel_border']),
+            )
+            fft_summary.setZValue(50)
+            fft_summary.setVisible(False)
+            pw.addItem(fft_summary)
+            self.fft_summary_items.append(fft_summary)
+
+            harmonic_markers = pg.ScatterPlotItem(size=9, symbol='t', pen=pg.mkPen(None))
+            harmonic_markers.setZValue(35)
+            harmonic_markers.setVisible(False)
+            pw.addItem(harmonic_markers)
+            self.fft_harmonic_markers.append(harmonic_markers)
+            pw.getViewBox().sigRangeChanged.connect(
+                lambda *_, idx=i: self._position_fft_summary(idx)
+            )
 
             v_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(self.theme_colors['crosshair'], width=1, style=Qt.PenStyle.DashLine))
             h_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(self.theme_colors['crosshair'], width=1, style=Qt.PenStyle.DashLine))
@@ -2822,6 +3030,9 @@ class MCUStudioWindow(QMainWindow):
 
             self.plot_widgets.append(pw)
             self.plot_splitter.addWidget(pw)
+
+        for plot_idx in range(3):
+            self._apply_plot_mode_visuals(plot_idx)
             
         plot_panel = QWidget()
         plot_panel_layout = QVBoxLayout(plot_panel)
@@ -3088,6 +3299,7 @@ class MCUStudioWindow(QMainWindow):
 
     def handle_measurement_click(self, event, plot_idx):
         if (not self.measurement_mode or self.layout_switching
+                or self.plot_modes[plot_idx] != "time"
                 or event.button() != Qt.MouseButton.LeftButton):
             return
         pw = self.plot_widgets[plot_idx]
@@ -3131,6 +3343,298 @@ class MCUStudioWindow(QMainWindow):
         )
         self.lbl_measurement_result.setToolTip(f"P1: {first[3]}\nP2: {second[3]}")
 
+    def _save_fft_state(self):
+        state = {
+            "modes": list(self.plot_modes),
+            "settings": [normalize_fft_settings(item) for item in self.fft_settings],
+        }
+        self.db.save_config(
+            self.FFT_STATE_KEY,
+            json.dumps(state, ensure_ascii=False, separators=(",", ":")),
+        )
+
+    def _apply_plot_mode_visuals(self, plot_idx):
+        if plot_idx >= len(getattr(self, "plot_widgets", [])):
+            return
+        frequency_mode = self.plot_modes[plot_idx] == "fft"
+        plot = self.plot_widgets[plot_idx]
+        plot.setLabel('bottom', '频率 (Hz)' if frequency_mode else '时间 (ms)')
+        if frequency_mode:
+            scale = normalize_fft_settings(self.fft_settings[plot_idx])["scale"]
+            labels = {
+                "percent": "相对基波 (%)",
+                "amplitude": "幅值",
+                "dbc": "相对基波 (dBc)",
+            }
+            plot.setLabel('left', labels[scale])
+        else:
+            plot.setLabel('left', '')
+        self.fft_summary_items[plot_idx].setVisible(frequency_mode)
+        self.fft_harmonic_markers[plot_idx].setVisible(frequency_mode)
+        for overlay in (self.v_lines[plot_idx], self.h_lines[plot_idx],
+                        self.hover_dots[plot_idx], self.hover_labels[plot_idx]):
+            overlay.setVisible(False)
+
+    def set_plot_mode(self, plot_idx, mode):
+        if not 0 <= int(plot_idx) < 3 or mode not in ("time", "fft"):
+            return
+        if self.plot_modes[plot_idx] == mode:
+            return
+        if mode == "fft" and self.measurement_mode:
+            self.toggle_measurement_mode(False)
+        self.plot_modes[plot_idx] = mode
+        self.hover_last_point[plot_idx] = None
+        self.canvas_fixed_ranges[plot_idx] = None
+        self.fft_last_update[plot_idx] = 0.0
+        self.fft_results[plot_idx] = {}
+        self._apply_plot_mode_visuals(plot_idx)
+        self._save_fft_state()
+        self.schedule_workspace_save()
+        self.update_plot_canvas(force=True)
+
+    def _position_fft_summary(self, plot_idx):
+        if (plot_idx >= len(getattr(self, "fft_summary_items", []))
+                or self.plot_modes[plot_idx] != "fft"):
+            return
+        try:
+            x_range, y_range = self.plot_widgets[plot_idx].getViewBox().viewRange()
+            self.fft_summary_items[plot_idx].setPos(x_range[1], y_range[1])
+        except (IndexError, RuntimeError):
+            pass
+
+    def configure_fft(self, plot_idx):
+        settings = normalize_fft_settings(self.fft_settings[plot_idx])
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"CH{plot_idx + 1} · FFT 参数")
+        dialog.setMinimumWidth(500)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(13)
+        form = QFormLayout()
+
+        window_combo = QComboBox()
+        for key, label in WINDOW_LABELS.items():
+            window_combo.addItem(label, key)
+        window_combo.setCurrentIndex(max(0, window_combo.findData(settings["window"])))
+        size_combo = QComboBox()
+        size_combo.addItem("自动（按已有数据取 2 的幂）", 0)
+        for size in (128, 256, 512, 1024, 2048, 4096, 8192):
+            size_combo.addItem(f"{size} 点", size)
+        size_combo.setCurrentIndex(max(0, size_combo.findData(settings["fft_size"])))
+        scale_combo = QComboBox()
+        scale_combo.addItem("相对基波百分比", "percent")
+        scale_combo.addItem("线性幅值", "amplitude")
+        scale_combo.addItem("相对基波 dBc", "dbc")
+        scale_combo.setCurrentIndex(max(0, scale_combo.findData(settings["scale"])))
+        display_max_edit = QLineEdit(f'{settings["display_max_hz"]:g}')
+        fundamental_min_edit = QLineEdit(f'{settings["fundamental_min_hz"]:g}')
+        fundamental_max_edit = QLineEdit(f'{settings["fundamental_max_hz"]:g}')
+        db_floor_edit = QLineEdit(f'{settings["db_floor"]:g}')
+        for edit in (display_max_edit, fundamental_min_edit, fundamental_max_edit, db_floor_edit):
+            edit.setValidator(QDoubleValidator(edit))
+        harmonic_count = QSpinBox()
+        harmonic_count.setRange(2, 30)
+        harmonic_count.setValue(settings["harmonic_count"])
+        search_bins = QSpinBox()
+        search_bins.setRange(0, 8)
+        search_bins.setValue(settings["harmonic_search_bins"])
+        remove_dc = QCheckBox("去除平均值，避免直流分量遮挡低频信号")
+        remove_dc.setChecked(settings["remove_dc"])
+
+        form.addRow("窗函数", window_combo)
+        form.addRow("分析点数", size_combo)
+        form.addRow("纵轴", scale_combo)
+        form.addRow("显示最高频率", display_max_edit)
+        form.addRow("基波搜索下限", fundamental_min_edit)
+        form.addRow("基波搜索上限", fundamental_max_edit)
+        form.addRow("分析谐波次数", harmonic_count)
+        form.addRow("谐波峰值搜索 ±频点", search_bins)
+        form.addRow("dBc 显示下限", db_floor_edit)
+        layout.addLayout(form)
+        layout.addWidget(remove_dc)
+        note = QLabel(
+            "频率填写 0 表示自动使用奈奎斯特频率。Hann 适合一般频谱观察；"
+            "Flat Top 更适合比较幅值。基波应限制在预期频段内，避免把较强谐波误认为基波。"
+        )
+        note.setWordWrap(True)
+        note.setObjectName("fieldHint")
+        layout.addWidget(note)
+        actions = QHBoxLayout()
+        defaults = QPushButton("恢复推荐值")
+        cancel = QPushButton("取消")
+        apply_button = QPushButton("应用")
+        apply_button.setObjectName("primaryButton")
+        actions.addWidget(defaults)
+        actions.addStretch()
+        actions.addWidget(cancel)
+        actions.addWidget(apply_button)
+        layout.addLayout(actions)
+
+        def restore_defaults():
+            window_combo.setCurrentIndex(window_combo.findData(DEFAULT_FFT_SETTINGS["window"]))
+            size_combo.setCurrentIndex(size_combo.findData(0))
+            scale_combo.setCurrentIndex(scale_combo.findData("percent"))
+            display_max_edit.setText("0")
+            fundamental_min_edit.setText("0.5")
+            fundamental_max_edit.setText("0")
+            harmonic_count.setValue(10)
+            search_bins.setValue(2)
+            db_floor_edit.setText("-100")
+            remove_dc.setChecked(True)
+
+        defaults.clicked.connect(restore_defaults)
+        cancel.clicked.connect(dialog.reject)
+        apply_button.clicked.connect(dialog.accept)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            candidate = normalize_fft_settings({
+                "window": window_combo.currentData(),
+                "fft_size": size_combo.currentData(),
+                "scale": scale_combo.currentData(),
+                "display_max_hz": float(display_max_edit.text() or 0),
+                "fundamental_min_hz": float(fundamental_min_edit.text() or 0),
+                "fundamental_max_hz": float(fundamental_max_edit.text() or 0),
+                "harmonic_count": harmonic_count.value(),
+                "harmonic_search_bins": search_bins.value(),
+                "db_floor": float(db_floor_edit.text() or -100),
+                "remove_dc": remove_dc.isChecked(),
+            })
+        except ValueError:
+            QMessageBox.warning(self, "FFT 参数无效", "频率和 dBc 下限必须是有效数字。")
+            return
+        if (candidate["fundamental_max_hz"] > 0.0
+                and candidate["fundamental_max_hz"] <= candidate["fundamental_min_hz"]):
+            QMessageBox.warning(self, "FFT 参数无效", "基波搜索上限必须大于下限；填写 0 可自动使用最高频率。")
+            return
+        self.fft_settings[plot_idx] = candidate
+        self.fft_last_update[plot_idx] = 0.0
+        self._apply_plot_mode_visuals(plot_idx)
+        self._save_fft_state()
+        if self.plot_modes[plot_idx] != "fft":
+            self.set_plot_mode(plot_idx, "fft")
+        else:
+            self.update_plot_canvas(force=True)
+
+    def _format_fft_summary(self, plot_idx, results):
+        if not results:
+            return "<div style='padding:7px 9px'><b>FFT</b><br>等待有效采样数据</div>"
+        rows = []
+        first_result = next(iter(results.values()))
+        rows.append(
+            f"<span style='color:#8e99a8'>FFT {first_result['fft_size']} 点 · "
+            f"Δf {first_result['resolution_hz']:.4g} Hz · "
+            f"Fs {first_result['sample_rate_hz']:.4g} Hz</span>"
+        )
+        for path, result in results.items():
+            color = self._curve_color(path)
+            rows.append(
+                f"<b style='color:{color}'>{html.escape(path)}</b>　"
+                f"基波 {result['fundamental_frequency_hz']:.5g} Hz　"
+                f"幅值 {result['fundamental_amplitude']:.5g}　"
+                f"THD {result['thd_percent']:.3g}%"
+            )
+            harmonic_parts = [
+                f"H{item['order']} {item['percent']:.3g}%"
+                for item in result["harmonics"][1:]
+            ]
+            for start in range(0, len(harmonic_parts), 5):
+                rows.append("　".join(harmonic_parts[start:start + 5]))
+        return "<div style='padding:7px 9px; line-height:1.35'>" + "<br>".join(rows) + "</div>"
+
+    def _update_fft_plot(self, plot_idx):
+        now = time.monotonic()
+        if now - self.fft_last_update[plot_idx] < 0.25:
+            return
+        self.fft_last_update[plot_idx] = now
+        settings = normalize_fft_settings(self.fft_settings[plot_idx])
+        copy_count = settings["fft_size"] or 4096
+        snapshots = {}
+        with QMutexLocker(self.buffer_mutex):
+            for path in self.plot_active_paths[plot_idx]:
+                if path not in self.ch_paths:
+                    continue
+                channel_idx = self.ch_paths.index(path)
+                snapshots[path] = (
+                    list(self.ch_time_stamps[channel_idx][-copy_count:]),
+                    list(self.ch_buffers[channel_idx][-copy_count:]),
+                )
+
+        plot = self.plot_widgets[plot_idx]
+        curves_map = self.plot_curves_dict[plot_idx]
+        for path in list(curves_map):
+            if path not in self.plot_active_paths[plot_idx]:
+                self.plot_legends[plot_idx].removeItem(path)
+                plot.removeItem(curves_map.pop(path))
+        results = {}
+        waiting = []
+        all_y = []
+        marker_spots = []
+        maximum_frequency = 0.0
+        for path, (timestamps, samples) in snapshots.items():
+            result = analyze_spectrum(timestamps, samples, settings)
+            if not result.get("ok"):
+                waiting.append(f"{path}：{result.get('reason', '数据不足')}")
+                if path in curves_map:
+                    curves_map[path].setData([], [])
+                continue
+            results[path] = result
+            display_max = settings["display_max_hz"] or result["nyquist_hz"]
+            display_max = min(display_max, result["nyquist_hz"])
+            maximum_frequency = max(maximum_frequency, display_max)
+            frequencies = result["frequencies"]
+            display_values = spectrum_display_values(
+                result["amplitudes"], result["fundamental_amplitude"],
+                settings["scale"], settings["db_floor"],
+            )
+            visible = frequencies <= display_max
+            x_values, y_values = frequencies[visible], display_values[visible]
+            if path not in curves_map:
+                pen = QPen(QColor(self._curve_color(path)), 1.7)
+                pen.setCosmetic(True)
+                curves_map[path] = plot.plot(pen=pen, antialias=True, name=path)
+                curves_map[path].setClipToView(True)
+            curves_map[path].setData(x_values, y_values)
+            all_y.append(y_values)
+            for harmonic in result["harmonics"]:
+                if harmonic["frequency_hz"] > display_max:
+                    continue
+                marker_y = spectrum_display_values(
+                    [harmonic["amplitude"]], result["fundamental_amplitude"],
+                    settings["scale"], settings["db_floor"],
+                )[0]
+                marker_spots.append({
+                    "pos": (harmonic["frequency_hz"], float(marker_y)),
+                    "brush": pg.mkBrush(self._curve_color(path)),
+                    "data": (path, harmonic["order"]),
+                })
+        for path in self.plot_active_paths[plot_idx]:
+            if path not in snapshots and path in curves_map:
+                curves_map[path].setData([], [])
+
+        self.fft_results[plot_idx] = results
+        self.plot_legends[plot_idx].setVisible(bool(self.plot_active_paths[plot_idx]))
+        self.fft_harmonic_markers[plot_idx].setData(spots=marker_spots)
+        self.fft_harmonic_markers[plot_idx].setVisible(bool(marker_spots))
+        if results:
+            self.fft_summary_items[plot_idx].setHtml(self._format_fft_summary(plot_idx, results))
+            plot.setXRange(0.0, max(maximum_frequency, 1.0), padding=0)
+            if settings["scale"] == "dbc":
+                plot.setYRange(settings["db_floor"], 5.0, padding=0)
+            elif settings["scale"] == "percent":
+                finite_max = max((float(np.max(values)) for values in all_y if values.size), default=100.0)
+                plot.setYRange(0.0, max(105.0, finite_max * 1.08), padding=0)
+            else:
+                finite_max = max((float(np.max(values)) for values in all_y if values.size), default=1.0)
+                plot.setYRange(0.0, max(finite_max * 1.08, 1e-9), padding=0)
+        else:
+            message = "<br>".join(html.escape(item) for item in waiting[:4]) or "当前通道暂无变量"
+            self.fft_summary_items[plot_idx].setHtml(
+                f"<div style='padding:7px 9px'><b>FFT</b><br>{message}</div>"
+            )
+        self.fft_summary_items[plot_idx].setVisible(True)
+        self._position_fft_summary(plot_idx)
+
     def start_canvas_auto_adapt(self):
         if not any(self.ch_paths):
             QMessageBox.information(self, "一键自适应画布", "请先把至少一个变量绑定到波形通道。")
@@ -3173,6 +3677,8 @@ class MCUStudioWindow(QMainWindow):
         adapted = 0
         with QMutexLocker(self.buffer_mutex):
             for plot_idx in range(3):
+                if self.plot_modes[plot_idx] == "fft":
+                    continue
                 x_values, y_values = [], []
                 for path in self.plot_active_paths[plot_idx]:
                     try: channel_idx = self.ch_paths.index(path)
@@ -3210,7 +3716,9 @@ class MCUStudioWindow(QMainWindow):
 
     def reset_canvas_adapt_ranges(self):
         self.canvas_fixed_ranges = [None, None, None]
-        for plot_widget in getattr(self, 'plot_widgets', []):
+        for plot_idx, plot_widget in enumerate(getattr(self, 'plot_widgets', [])):
+            if self.plot_modes[plot_idx] == "fft":
+                continue
             try: plot_widget.getViewBox().enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
             except Exception: pass
 
@@ -3539,6 +4047,18 @@ class MCUStudioWindow(QMainWindow):
         self.btn_reconnect.setEnabled(True)
         self.lbl_status_text.setText("通信后端已断开（未复位 MCU）")
         self.lbl_status_text.setStyleSheet("color: #f0a020; font-family: 'Microsoft YaHei'; font-size: 13px; font-weight: bold;")
+
+    def return_to_configuration(self):
+        if self.flash_sequence_active:
+            QMessageBox.information(self, "正在烧录", "烧录尚未完成，请等待结束后再返回配置。")
+            return
+        if self.reconnect_worker and self.reconnect_worker.isRunning():
+            QMessageBox.information(self, "正在重连", "通信后端正在重连，请等待完成后再返回配置。")
+            return
+        self._close_destination = "config"
+        self.btn_back_config.setEnabled(False)
+        self.lbl_status_text.setText("正在安全释放调试连接并返回配置（不会复位 MCU）…")
+        self.close()
 
     def _close_native_link_async(self, link, next_action=""):
         closer = BackendCloseWorker(link, self.jlink_lock, self)
@@ -3919,11 +4439,17 @@ class MCUStudioWindow(QMainWindow):
         indices = indices[indices < count]
         return x_values[indices], y_values[indices]
 
-    def update_plot_canvas(self):
-        if self.is_frozen or self.layout_switching: return
+    def update_plot_canvas(self, force=False):
+        if (self.is_frozen and not force) or self.layout_switching: return
         layout_id = self.current_layout_id
+        for plot_idx in range(3):
+            visible = plot_idx == 0 or (plot_idx == 1 and layout_id >= 2) or (plot_idx == 2 and layout_id >= 3)
+            if visible and self.plot_modes[plot_idx] == "fft":
+                self._update_fft_plot(plot_idx)
         locker = QMutexLocker(self.buffer_mutex)
         for i in range(3):
+            if self.plot_modes[i] == "fft":
+                continue
             active_paths = self.plot_active_paths[i]
             curves_map = self.plot_curves_dict[i]
             ch_idx = next(
@@ -3988,8 +4514,112 @@ class MCUStudioWindow(QMainWindow):
                             curves_map[path].setData(x_arr, y_arr)
             except: pass 
 
+    def _nearest_fft_sample(self, plot_idx, scene_pos, max_distance=34.0):
+        result_map = self.fft_results[plot_idx]
+        if not result_map:
+            return None
+        settings = normalize_fft_settings(self.fft_settings[plot_idx])
+        view_box = self.plot_widgets[plot_idx].getViewBox()
+        mouse_frequency = view_box.mapSceneToView(scene_pos).x()
+        candidates = []
+        for path, result in result_map.items():
+            frequencies = result["frequencies"]
+            amplitudes = result["amplitudes"]
+            display_values = spectrum_display_values(
+                amplitudes, result["fundamental_amplitude"],
+                settings["scale"], settings["db_floor"],
+            )
+            index = int(np.searchsorted(frequencies, mouse_frequency))
+            for candidate in {max(0, min(len(frequencies) - 1, index)),
+                              max(0, min(len(frequencies) - 1, index - 1))}:
+                candidates.append({
+                    "path": path,
+                    "frequency": float(frequencies[candidate]),
+                    "display_value": float(display_values[candidate]),
+                    "amplitude": float(amplitudes[candidate]),
+                    "harmonic": None,
+                })
+            for harmonic in result["harmonics"]:
+                harmonic_display = spectrum_display_values(
+                    [harmonic["amplitude"]], result["fundamental_amplitude"],
+                    settings["scale"], settings["db_floor"],
+                )[0]
+                candidates.append({
+                    "path": path,
+                    "frequency": float(harmonic["frequency_hz"]),
+                    "display_value": float(harmonic_display),
+                    "amplitude": float(harmonic["amplitude"]),
+                    "harmonic": harmonic,
+                })
+
+        best = None
+        best_distance_sq = float(max_distance) ** 2
+        for candidate in candidates:
+            scene_point = view_box.mapViewToScene(QPointF(
+                candidate["frequency"], candidate["display_value"]
+            ))
+            distance_sq = ((scene_point.x() - scene_pos.x()) ** 2
+                           + (scene_point.y() - scene_pos.y()) ** 2)
+            if distance_sq <= best_distance_sq:
+                best_distance_sq = distance_sq
+                best = candidate
+        return best
+
+    def _handle_fft_mouse_move(self, pos, plot_idx):
+        plot = self.plot_widgets[plot_idx]
+        if plot.isHidden() or not plot.isVisible() or plot.width() <= 20 or plot.height() <= 20:
+            return
+        view_box = plot.getViewBox()
+        if not view_box.sceneBoundingRect().contains(pos):
+            return
+        nearest = self._nearest_fft_sample(plot_idx, pos)
+        if nearest is None:
+            self.hover_dots[plot_idx].setVisible(False)
+            self.hover_labels[plot_idx].setVisible(False)
+            return
+        frequency = nearest["frequency"]
+        display_value = nearest["display_value"]
+        path = nearest["path"]
+        point_key = (path, frequency, display_value, bool(nearest["harmonic"]))
+        if point_key == self.hover_last_point[plot_idx]:
+            return
+        self.hover_last_point[plot_idx] = point_key
+        self.v_lines[plot_idx].setPos(frequency)
+        self.v_lines[plot_idx].setVisible(True)
+        self.h_lines[plot_idx].setPos(display_value)
+        self.h_lines[plot_idx].setVisible(True)
+        self.hover_dots[plot_idx].setData(
+            [frequency], [display_value], brush=pg.mkBrush(self._curve_color(path))
+        )
+        self.hover_dots[plot_idx].setVisible(True)
+        scale = normalize_fft_settings(self.fft_settings[plot_idx])["scale"]
+        display_text = (
+            f"{display_value:.4g}%" if scale == "percent" else
+            (f"{display_value:.4g} dBc" if scale == "dbc" else f"{display_value:.6g}")
+        )
+        harmonic = nearest["harmonic"]
+        if harmonic:
+            details = (
+                f"H{harmonic['order']} · {frequency:.6g} Hz\n"
+                f"相对基波 {harmonic['percent']:.4g}% · 幅值 {harmonic['amplitude']:.6g}"
+            )
+        else:
+            details = (
+                f"f: {frequency:.6g} Hz · {display_text}\n"
+                f"线性幅值 {nearest['amplitude']:.6g}"
+            )
+        self.hover_labels[plot_idx].setText(f" {path}\n {details} ")
+        self.hover_labels[plot_idx].setPos(frequency, display_value)
+        self.hover_labels[plot_idx].setVisible(True)
+
     def handle_plot_mouse_move(self, pos, plot_idx):
         if not self.is_frozen or self.layout_switching: return
+        if self.plot_modes[plot_idx] == "fft":
+            try:
+                self._handle_fft_mouse_move(pos, plot_idx)
+            except (IndexError, KeyError, TypeError, ValueError, RuntimeError):
+                pass
+            return
         if self.measurement_mode:
             return
         pw = self.plot_widgets[plot_idx]
@@ -4089,16 +4719,34 @@ class MCUStudioWindow(QMainWindow):
             empty.setEnabled(False)
 
         menu.addSeparator()
+        display_menu = menu.addMenu("显示模式")
+        time_action = display_menu.addAction("时域波形")
+        time_action.setCheckable(True)
+        time_action.setChecked(self.plot_modes[plot_idx] == "time")
+        fft_action = display_menu.addAction("频域分析（FFT）")
+        fft_action.setCheckable(True)
+        fft_action.setChecked(self.plot_modes[plot_idx] == "fft")
+        fft_settings_action = menu.addAction("FFT 参数…")
+        fft_settings_action.setEnabled(bool(self.plot_active_paths[plot_idx]))
+        menu.addSeparator()
         measure_action = menu.addAction("两点差值测量")
         measure_action.setCheckable(True)
         measure_action.setChecked(self.measurement_mode)
+        measure_action.setEnabled(self.plot_modes[plot_idx] == "time")
         adapt_action = menu.addAction("自动适应当前波形")
+        adapt_action.setEnabled(self.plot_modes[plot_idx] == "time")
         clear_action = menu.addAction("清除测量标记")
         clear_action.setEnabled(any(self.measurement_points))
         menu.addSeparator()
         export_action = menu.addAction("导出采样 CSV…")
         chosen = menu.exec(pw.mapToGlobal(pos))
-        if chosen == measure_action:
+        if chosen == time_action:
+            self.set_plot_mode(plot_idx, "time")
+        elif chosen == fft_action:
+            self.set_plot_mode(plot_idx, "fft")
+        elif chosen == fft_settings_action:
+            self.configure_fft(plot_idx)
+        elif chosen == measure_action:
             self.toggle_measurement_mode(measure_action.isChecked())
         elif chosen == adapt_action:
             self.start_canvas_auto_adapt()
@@ -5048,6 +5696,13 @@ class MCUStudioWindow(QMainWindow):
             self.variable_write_worker.stop(wait_ms=0)
         if hasattr(self, "history_writer"):
             self.history_writer.stop(wait_ms=1500)
+        if not self._shutdown_jlink_started and self.jlink_native_instance is not None:
+            self._shutdown_jlink_started = True
+            old_link = self.jlink_native_instance
+            self.jlink_native_instance = None
+            if hasattr(self, "variable_write_worker"):
+                self.variable_write_worker.update_jlink(None)
+            self._close_native_link_async(old_link)
         running_threads = {
             thread for thread in self.findChildren(QThread)
             if thread.isRunning()
@@ -5076,6 +5731,9 @@ class MCUStudioWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
+        if not self._session_closed_emitted:
+            self._session_closed_emitted = True
+            self.session_closed.emit(self._close_destination)
         event.accept()
 
     def _retry_close_after_workers(self):
@@ -5086,6 +5744,7 @@ class MCUStudioWindow(QMainWindow):
 def run_application() -> int:
     """Create the Qt application and run the login/main-window flow."""
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
     bundle_root = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     icon_path = os.path.join(bundle_root, "assets", "mcu_studio_anime.png")
     if os.path.isfile(icon_path):
@@ -5093,12 +5752,32 @@ def run_application() -> int:
     pg.setConfigOption("foreground", "#e0e0e0")
     app.setStyleSheet(DARK_STYLE)
     db = LiveWatchDB()
-    dialog = LoginConfigDialog(db)
-    if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.is_connected:
-        return 0
+    active = {"dialog": None, "window": None}
 
-    window = MCUStudioWindow(dialog.config, db)
-    window.show()
+    def workspace_closed(destination):
+        closed_window = active.get("window")
+        active["window"] = None
+        if closed_window is not None:
+            QTimer.singleShot(0, closed_window.deleteLater)
+        if destination == "config":
+            QTimer.singleShot(0, show_configuration)
+        else:
+            QTimer.singleShot(0, app.quit)
+
+    def show_configuration():
+        dialog = LoginConfigDialog(db)
+        active["dialog"] = dialog
+        result = dialog.exec()
+        active["dialog"] = None
+        if result != QDialog.DialogCode.Accepted or not dialog.is_connected:
+            QTimer.singleShot(0, app.quit)
+            return
+        window = MCUStudioWindow(dialog.config, db)
+        active["window"] = window
+        window.session_closed.connect(workspace_closed)
+        window.show()
+
+    QTimer.singleShot(0, show_configuration)
     return app.exec()
 
 

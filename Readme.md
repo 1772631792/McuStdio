@@ -27,7 +27,7 @@ V2.1 在实时变量示波器和在线调参基础上加入独立 FFT 频域分�
 2. 使用 ST-Link、CMSIS-DAP/DAPLink 或 OpenOCD：同时下载 `OpenOCD.zip`，放在 EXE 同级并直接解压，得到 `OpenOCD/` 目录。
 3. 首次运行会在 EXE 同级创建 `live_watch_history.db`，保存配置、调节参数和受控容量的采样历史。
 
-完整变更见 [V2.1 发布说明](RELEASE_NOTES_V2.1.md)。
+完整变更见 [V2.1 发布说明](doc/releases/RELEASE_NOTES_V2.1.md)。
 
 ## 设计目标
 

@@ -5,7 +5,8 @@ __pycache__/
 # 构建产物
 artifacts/
 /dist/
-/Mcu_Studio.exe
+/Mcu_Studio*.exe
+/OpenOCD*.zip
 
 # 用户本地数据
 data/*.db
@@ -16,8 +17,9 @@ data/*.db
 *.log
 *.tmp
 
-# 本地工具链压缩包（解压后的 runtime/OpenOCD/ 才跟随仓库）
-/runtime/OpenOCD.zip
+# 发布附件和旧版重复配置只放 GitHub Release，不进入源码树
+/runtime/OpenOCD*.zip
+/runtime/cfg/
 
 
 

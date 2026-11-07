@@ -316,7 +316,59 @@ def validate_imports_and_elf_helpers() -> None:
         new_state.types = {}
         studio.symbol_cache = {}
         studio.synchronize_saved_variables_with_elf()
-        check(not test_database.get_var_map(0), "renamed or removed ELF roots invalidate saved watches")
+        check(
+            "state.value" in test_database.get_var_map(0)
+            and studio.resolve_saved_variable_address("state.value", 8, "state") is None,
+            "temporarily missing ELF roots stay saved without reusing stale addresses",
+        )
+        studio.plot_active_paths[0] = ["state.value"]
+        check(
+            studio._rebuild_sampling_channels_from_bindings() == 1
+            and studio.plot_active_paths[0] == ["state.value"]
+            and not studio.ch_paths,
+            "temporarily missing waveform bindings remain configured but are not sampled",
+        )
+        new_state.symbols = {"state": 0x20002000}
+        new_state.types = {
+            "state": {
+                "kind": "struct", "name": "State", "size": 12,
+                "members": [{"name": "value", "offset": 8, "type": scalar}],
+            }
+        }
+        studio.symbol_cache = dict(new_state.symbols)
+        studio.synchronize_saved_variables_with_elf()
+        check(
+            studio._rebuild_sampling_channels_from_bindings() == 0
+            and studio.ch_paths == ["state.value"]
+            and studio.ch_addrs == [hex(0x20002008)],
+            "saved waveform bindings resume automatically when the ELF variable returns",
+        )
+        new_state.symbols = {}
+        new_state.types = {}
+        studio.symbol_cache = {}
+        studio.synchronize_saved_variables_with_elf(remove_missing=True)
+        check(
+            not test_database.get_var_map(0)
+            and studio._rebuild_sampling_channels_from_bindings() == 0
+            and not studio.plot_active_paths[0]
+            and not studio.ch_paths,
+            "authoritative post-flash ELF sync removes variable names that no longer exist",
+        )
+        studio.elf_last_signature = (1, 100)
+        studio.elf_pending_signature = None
+        studio.elf_pending_stable_ticks = 0
+        with patch.object(studio, "_elf_file_signature", return_value=(2, 200)), patch.object(
+            studio, "reload_elf_symbols"
+        ) as premature_reload:
+            studio.check_elf_file_changed()
+            studio.check_elf_file_changed()
+        check(
+            not premature_reload.called
+            and studio.elf_update_pending
+            and studio.btn_flash.text() == "烧录*",
+            "a newly compiled ELF stays pending until flash while the old symbol map remains active",
+        )
+        studio._set_elf_update_pending(False)
 
         check(studio.tab_widget.count() == 3, "three fixed debug windows are created")
         check(studio.debug_trees[0].headerItem().text(0) == "全局变量", "debug variable column uses the compact title")

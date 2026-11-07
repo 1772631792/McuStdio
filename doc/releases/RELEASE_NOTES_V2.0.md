@@ -1,4 +1,4 @@
-# Mcu Studio V2.0 正式版
+# MCU Live Watch Studio V2.0
 
 V2.0 是面向 Cortex-M 实时变量观察、在线调参、波形分析和固件烧录的正式可用版本。
 

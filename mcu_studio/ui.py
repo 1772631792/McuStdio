@@ -2283,6 +2283,7 @@ class MCUStudioWindow(QMainWindow):
         self.backend_suspended = False
         self.flash_sequence_active = False
         self.elf_reload_in_progress = False
+        self.elf_update_pending = False
         self.jlink_native_instance = None 
         self.jlink_lock = threading.RLock()
         self.openocd_link_alive = False  
@@ -2478,7 +2479,10 @@ class MCUStudioWindow(QMainWindow):
     def _finish_initial_workspace_load(self, synchronize_elf):
         if self.initial_workspace_loaded:
             return
-        self.load_history_from_db(synchronize_elf=synchronize_elf)
+        self.load_history_from_db(
+            synchronize_elf=synchronize_elf,
+            remove_missing=synchronize_elf,
+        )
         self.restore_workspace_state()
         self.workspace_restore_in_progress = False
         self.initial_workspace_loaded = True
@@ -2531,35 +2535,8 @@ class MCUStudioWindow(QMainWindow):
 
             for tree in self.debug_trees.values():
                 tree.clear()
-            self.load_history_from_db()
-
-            current_rows = {row[0]: row for row in self.db.get_all_vars()}
-            valid_paths, valid_types, valid_addrs = [], [], []
-            for path in list(self.ch_paths):
-                row = current_rows.get(path)
-                if row is not None:
-                    _name, v_type, offset, base_var, _tab_idx = row
-                    absolute_address = self.resolve_saved_variable_address(path, offset, base_var)
-                    if absolute_address is not None:
-                        valid_paths.append(path)
-                        valid_types.append(v_type)
-                        valid_addrs.append(hex(absolute_address))
-                        continue
-                for active in self.plot_active_paths:
-                    while path in active:
-                        active.remove(path)
-                for plot_idx, curves in enumerate(self.plot_curves_dict):
-                    curve = curves.pop(path, None)
-                    if curve is not None:
-                        try:
-                            self.plot_legends[plot_idx].removeItem(path)
-                            self.plot_widgets[plot_idx].removeItem(curve)
-                        except Exception: pass
-            self.ch_paths = valid_paths
-            self.ch_types = valid_types
-            self.ch_addrs = valid_addrs
-            self.ch_buffers = [[] for _path in valid_paths]
-            self.ch_time_stamps = [[] for _path in valid_paths]
+            self.load_history_from_db(remove_missing=source in ("flash", "manual"))
+            unavailable_count = self._rebuild_sampling_channels_from_bindings()
 
             if hasattr(self, 'adv_parse_dialog') and self.adv_parse_dialog:
                 try: self.adv_parse_dialog.replace_elf_database(refreshed)
@@ -2570,11 +2547,14 @@ class MCUStudioWindow(QMainWindow):
             self.elf_last_signature = self._elf_file_signature()
             self.elf_pending_signature = None
             self.elf_pending_stable_ticks = 0
+            self._set_elf_update_pending(False)
         finally:
             self.elf_reload_in_progress = False
 
         self.restart_sampling_thread()
         summary = f"已重新提取 ELF：{len(refreshed.symbols)} 个符号，{len(refreshed.types)} 个 DWARF 变量。"
+        if unavailable_count:
+            summary += f" {unavailable_count} 个已监视变量暂时不可用，配置已保留。"
         self.lbl_status_text.setText("ELF 已自动重新提取" if source == "flash" else "ELF 已重新提取")
         if show_message: QMessageBox.information(self, "重新提取 ELF 完成", summary)
         return True, summary
@@ -2590,7 +2570,11 @@ class MCUStudioWindow(QMainWindow):
         if self.elf_reload_in_progress or self.flash_sequence_active:
             return
         signature = self._elf_file_signature()
-        if signature is None or signature == self.elf_last_signature:
+        if signature is None:
+            self.elf_pending_signature = None
+            self.elf_pending_stable_ticks = 0
+            return
+        if signature == self.elf_last_signature:
             self.elf_pending_signature = None
             self.elf_pending_stable_ticks = 0
             return
@@ -2602,13 +2586,25 @@ class MCUStudioWindow(QMainWindow):
         self.elf_pending_stable_ticks += 1
         if self.elf_pending_stable_ticks < 2:
             return
-        ok, message = self.reload_elf_symbols(show_message=False, source="watch")
-        if ok:
-            self.lbl_status_text.setText("ELF 变化已自动同步到调试窗口")
-        else:
-            # Keep the old database and retry only after a short, stable delay.
-            self.elf_pending_stable_ticks = 0
-            self.lbl_status_text.setText(f"ELF 自动提取失败，将重试：{message.splitlines()[0]}")
+        # Compilation must not change the active symbol map while the target
+        # still runs the previous firmware.  The new ELF becomes authoritative
+        # only after a successful flash (or an explicit manual reload).
+        self.elf_last_signature = signature
+        self.elf_pending_signature = None
+        self.elf_pending_stable_ticks = 0
+        self._set_elf_update_pending(True)
+        self.lbl_status_text.setText("检测到新 ELF；继续使用旧映射，烧录成功后自动同步")
+
+    def _set_elf_update_pending(self, pending):
+        self.elf_update_pending = bool(pending)
+        if not hasattr(self, "btn_flash") or self.flash_sequence_active:
+            return
+        self.btn_flash.setText("烧录*" if self.elf_update_pending else "烧录")
+        self.btn_flash.setToolTip(
+            "检测到新 ELF；当前继续按旧 ELF 调试，烧录成功后自动切换并同步变量"
+            if self.elf_update_pending else
+            "通过当前调试后端烧录 ELF；只有点击并确认后才会擦写 Flash/复位"
+        )
 
     def type_info_for_path(self, path):
         if path.startswith(("0x", "0X")): return None
@@ -3932,6 +3928,7 @@ class MCUStudioWindow(QMainWindow):
             message += f"\n\n{'✓' if reload_ok else '⚠'} {reload_message}"
             self._set_flash_progress("success", details=message)
         else:
+            self._set_elf_update_pending(self.elf_update_pending)
             self.restart_sampling_thread()
             self._set_flash_progress("failed", details=message)
 
@@ -3963,6 +3960,7 @@ class MCUStudioWindow(QMainWindow):
                 self.lbl_status_text.setText("烧录完成，OpenOCD 调试连接恢复失败")
                 self._set_flash_progress("warning", details=message)
         else:
+            self._set_elf_update_pending(self.elf_update_pending)
             self.lbl_status_text.setText("OpenOCD 烧录失败")
             self._set_flash_progress("failed", details=message)
 
@@ -4229,25 +4227,65 @@ class MCUStudioWindow(QMainWindow):
             for path in paths:
                 if not isinstance(path, str) or path in self.plot_active_paths[plot_idx]:
                     continue
-                row = db_rows.get(path)
-                if row is None:
-                    continue
-                _name, var_type, offset, base_var, _tab_idx = row
-                address = self.resolve_saved_variable_address(path, offset, base_var)
-                if address is None:
-                    continue
                 self.plot_active_paths[plot_idx].append(path)
-                if path not in self.ch_paths:
-                    self.ch_paths.append(path)
-                    self.ch_types.append(var_type)
-                    self.ch_addrs.append(hex(address))
-                    self.ch_buffers.append([])
-                    self.ch_time_stamps.append([])
                 self._curve_color(path)
+        self._rebuild_sampling_channels_from_bindings(db_rows)
         self.refresh_ui_channel_bar()
         self.reset_canvas_adapt_ranges()
         if self.ch_paths:
             self.restart_sampling_thread()
+
+    def _rebuild_sampling_channels_from_bindings(self, db_rows=None):
+        """Resolve saved plot bindings without discarding temporarily missing ELF variables."""
+        if db_rows is None:
+            db_rows = {}
+            for row in self.db.get_all_vars():
+                db_rows.setdefault(row[0], row)
+
+        configured_paths = set(db_rows)
+        for plot_idx, paths in enumerate(self.plot_active_paths):
+            self.plot_active_paths[plot_idx] = [path for path in paths if path in configured_paths]
+            curves = self.plot_curves_dict[plot_idx]
+            for path in list(curves):
+                if path not in self.plot_active_paths[plot_idx]:
+                    try:
+                        self.plot_legends[plot_idx].removeItem(path)
+                        self.plot_widgets[plot_idx].removeItem(curves[path])
+                    except Exception:
+                        pass
+                    curves.pop(path, None)
+
+        requested_paths = []
+        for paths in self.plot_active_paths:
+            for path in paths:
+                if path not in requested_paths:
+                    requested_paths.append(path)
+
+        valid_paths, valid_types, valid_addrs = [], [], []
+        for path in requested_paths:
+            row = db_rows.get(path)
+            if row is None:
+                continue
+            _name, var_type, offset, base_var, _tab_idx = row
+            address = self.resolve_saved_variable_address(path, offset, base_var)
+            if address is None:
+                continue
+            valid_paths.append(path)
+            valid_types.append(var_type)
+            valid_addrs.append(hex(address))
+
+        self.ch_paths = valid_paths
+        self.ch_types = valid_types
+        self.ch_addrs = valid_addrs
+        self.ch_buffers = [[] for _path in valid_paths]
+        self.ch_time_stamps = [[] for _path in valid_paths]
+
+        valid_set = set(valid_paths)
+        for curves in self.plot_curves_dict:
+            for path, curve in curves.items():
+                if path not in valid_set:
+                    curve.setData([], [])
+        return len(requested_paths) - len(valid_paths)
 
     def restore_layout_and_type_configs(self):
         try:
@@ -4260,9 +4298,9 @@ class MCUStudioWindow(QMainWindow):
             if type_idx < self.input_type.count(): self.input_type.setCurrentIndex(type_idx)
         except: pass
 
-    def load_history_from_db(self, synchronize_elf=True):
+    def load_history_from_db(self, synchronize_elf=True, remove_missing=False):
         if synchronize_elf:
-            self.synchronize_saved_variables_with_elf()
+            self.synchronize_saved_variables_with_elf(remove_missing=remove_missing)
         db_vars = self.db.get_all_vars()
         for row in db_vars:
             path, v_type, offset, base_var = row[0], row[1], row[2], row[3]
@@ -4274,7 +4312,7 @@ class MCUStudioWindow(QMainWindow):
             t_idx = row[4] if len(row) > 4 else 0
             if '.' in path or '[' in path: self.inject_var_to_tree_ui(path, v_type, t_idx)
 
-    def synchronize_saved_variables_with_elf(self):
+    def synchronize_saved_variables_with_elf(self, remove_missing=False):
         """Rebuild every named watch from the active ELF for all debug windows."""
         old_rows = self.db.get_all_vars()
         named_roots = {
@@ -4285,10 +4323,12 @@ class MCUStudioWindow(QMainWindow):
         for root, tab_idx in named_roots:
             if root in self.elf_db.types:
                 self.db.replace_root_vars(root, tab_idx, self.elf_db.flatten(root))
-            elif root not in self.symbol_cache:
-                # The name no longer exists in the current firmware. Removing
-                # the complete root prevents an old address from being reused.
+            elif remove_missing and root not in self.symbol_cache:
+                # A successful post-flash/manual parse is authoritative: a
+                # missing variable name means the watch no longer exists.
                 self.db.replace_root_vars(root, tab_idx, [])
+            # File-watcher reloads are non-destructive because they can observe
+            # an intermediate ELF while the linker is still replacing it.
 
     def export_variable_csv(self, preferred_path=None):
         # Copy paired samples under the existing lock; dialogs and disk I/O never hold it.
@@ -5522,6 +5562,7 @@ class MCUStudioWindow(QMainWindow):
             offset, base_var, _v_type = tab_vars[path]
             absolute_address = self.resolve_saved_variable_address(path, offset, base_var)
             if absolute_address is None:
+                item.setText(2, "ELF 未找到")
                 return
 
             type_info = self.type_info_for_path(path)

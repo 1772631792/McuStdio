@@ -5,6 +5,7 @@ __pycache__/
 # 构建产物
 artifacts/
 /dist/
+/Mcu_Studio.exe
 
 # 用户本地数据
 data/*.db

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -363,6 +365,158 @@ class LowSpeedReadWorker(QThread):
             except OSError:
                 pass
             self.active_socket = None
+        return self.wait(max(0, int(wait_ms)))
+
+
+class VariableWriteWorker(QThread):
+    """Serialize RAM writes and collapse pending slider updates by variable."""
+
+    finished_signal = pyqtSignal(str, int, bool, str, object)
+
+    def __init__(self, config, jlink_instance=None, jlink_lock=None, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.jlink = jlink_instance
+        self.jlink_lock = jlink_lock or threading.RLock()
+        self._condition = threading.Condition()
+        self._pending = OrderedDict()
+        self._running = True
+        self._sequence = 0
+        self._active_socket = None
+
+    def update_jlink(self, instance):
+        with self._condition:
+            self.jlink = instance
+
+    def submit(self, key, address, data, value=None):
+        with self._condition:
+            self._sequence += 1
+            sequence = self._sequence
+            self._pending.pop(str(key), None)
+            self._pending[str(key)] = (sequence, int(address), bytes(data), value)
+            self._condition.notify()
+            return sequence
+
+    def cancel_pending(self):
+        with self._condition:
+            self._pending.clear()
+
+    def _write_openocd(self, address, data):
+        sock = connect_openocd_tcl(self.config, timeout=0.5)
+        self._active_socket = sock
+        try:
+            for offset, value in enumerate(data):
+                sock.sendall(f"mwb {hex(address + offset)} {value}\x1a".encode("utf-8"))
+                response = receive_tcl_response(sock)
+                if "ERROR" in response.upper():
+                    raise RuntimeError(response or "OpenOCD 内存写入失败")
+        finally:
+            self._active_socket = None
+            sock.close()
+
+    def run(self):
+        while True:
+            with self._condition:
+                while self._running and not self._pending:
+                    self._condition.wait()
+                if not self._running:
+                    break
+                key, request = self._pending.popitem(last=False)
+            sequence, address, data, value = request
+            try:
+                if self.config.backend_mode == "OPENOCD":
+                    self._write_openocd(address, data)
+                else:
+                    link = self.jlink
+                    if link is None:
+                        raise RuntimeError("J-Link 链路未连接")
+                    with self.jlink_lock:
+                        link.memory_write8(address, list(data))
+                self.finished_signal.emit(key, sequence, True, "", value)
+            except Exception as exc:
+                self.finished_signal.emit(key, sequence, False, str(exc), value)
+
+    def stop(self, wait_ms=300):
+        with self._condition:
+            self._running = False
+            self._pending.clear()
+            self._condition.notify_all()
+        sock = self._active_socket
+        if sock:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+        return self.wait(max(0, int(wait_ms)))
+
+
+class SampleHistoryWriter(QThread):
+    """Batch bounded waveform history into SQLite without blocking the UI."""
+
+    error_signal = pyqtSignal(str)
+    MAX_ROWS = 1_000_000
+
+    def __init__(self, database_path, parent=None):
+        super().__init__(parent)
+        self.database_path = str(database_path)
+        self._condition = threading.Condition()
+        self._pending = []
+        self._running = True
+
+    def submit(self, rows):
+        if not rows:
+            return
+        with self._condition:
+            self._pending.extend(rows)
+            if len(self._pending) > 50_000:
+                self._pending = self._pending[-50_000:]
+            self._condition.notify()
+
+    def run(self):
+        connection = None
+        try:
+            connection = sqlite3.connect(self.database_path, timeout=5.0)
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
+            inserted_since_prune = 0
+            while True:
+                with self._condition:
+                    if self._running and not self._pending:
+                        self._condition.wait(timeout=0.25)
+                    rows, self._pending = self._pending, []
+                    should_stop = not self._running and not rows
+                if should_stop:
+                    break
+                if not rows:
+                    continue
+                connection.executemany(
+                    "INSERT INTO sample_history(session_id, time_ms, variable, value) VALUES (?, ?, ?, ?)",
+                    rows,
+                )
+                connection.commit()
+                inserted_since_prune += len(rows)
+                if inserted_since_prune >= 50_000:
+                    connection.execute(
+                        "DELETE FROM sample_history WHERE id <= COALESCE(("
+                        "SELECT id FROM sample_history ORDER BY id DESC LIMIT 1 OFFSET ?), 0)",
+                        (self.MAX_ROWS,),
+                    )
+                    connection.commit()
+                    inserted_since_prune = 0
+        except Exception as exc:
+            self.error_signal.emit(str(exc))
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def stop(self, wait_ms=1500):
+        with self._condition:
+            self._running = False
+            self._condition.notify_all()
         return self.wait(max(0, int(wait_ms)))
 
 

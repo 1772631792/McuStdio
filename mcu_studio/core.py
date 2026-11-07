@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import ipaddress
 import re
+import shutil
 import socket
 import sqlite3
 import struct
@@ -14,6 +15,11 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict
+
+try:
+    import winreg
+except ImportError:
+    winreg = None
 
 try:
     from elftools.dwarf.descriptions import describe_form_class
@@ -71,11 +77,93 @@ def default_openocd_executable():
     project_dir = Path(__file__).resolve().parent.parent
     candidates = (
         launch_dir / "runtime" / "OpenOCD" / "bin" / "openocd.exe",
+        launch_dir / "OpenOCD" / "bin" / "openocd.exe",
         launch_dir.parent / "runtime" / "OpenOCD" / "bin" / "openocd.exe",
         project_dir / "runtime" / "OpenOCD" / "bin" / "openocd.exe",
     )
     match = next((path for path in candidates if path.is_file()), candidates[0])
     return os.path.normpath(str(match))
+
+
+def _unique_existing_paths(candidates, validator):
+    """Return normalized valid paths in priority order without duplicates."""
+    results = []
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = os.path.normpath(os.path.abspath(os.path.expandvars(os.path.expanduser(str(candidate)))))
+        key = os.path.normcase(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            validator(path)
+        except (OSError, ValueError):
+            continue
+        results.append(path)
+    return results
+
+
+def discover_jlink_directories(preferred="", current=""):
+    """Find usable SEGGER installations, keeping saved/user paths first."""
+    candidates = [preferred, current]
+    if winreg is not None:
+        registry_keys = (
+            r"SOFTWARE\SEGGER\J-Link",
+            r"SOFTWARE\WOW6432Node\SEGGER\J-Link",
+        )
+        for key_name in registry_keys:
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_name) as key:
+                    for value_name in ("InstallPath", "Path", "InstallDir"):
+                        try:
+                            candidates.append(winreg.QueryValueEx(key, value_name)[0])
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+    commander = shutil.which("JLink.exe")
+    if commander:
+        candidates.append(os.path.dirname(commander))
+    for base in filter(None, (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"))):
+        segger = Path(base) / "SEGGER"
+        candidates.append(segger / "JLink")
+        if segger.is_dir():
+            candidates.extend(sorted(segger.glob("JLink*"), reverse=True))
+
+    def validate(directory):
+        jlink_dll_path(directory)
+
+    return _unique_existing_paths(candidates, validate)
+
+
+def discover_openocd_executables(preferred="", current=""):
+    """Find OpenOCD executables, preferring the persisted project choice."""
+    candidates = [preferred, current, default_openocd_executable(), shutil.which("openocd.exe")]
+    program_files = [os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")]
+    for base in filter(None, program_files):
+        root = Path(base)
+        candidates.extend((
+            root / "OpenOCD" / "bin" / "openocd.exe",
+            root / "xPacks" / "OpenOCD" / "bin" / "openocd.exe",
+        ))
+        stm_plugins = root / "STMicroelectronics" / "STM32Cube" / "STM32CubeIDE" / "plugins"
+        if stm_plugins.is_dir():
+            candidates.extend(stm_plugins.glob("com.st.stm32cube.ide.mcu.externaltools.openocd.win32_*/tools/bin/openocd.exe"))
+    user_profile = Path(os.environ.get("USERPROFILE", ""))
+    xpack_root = user_profile / ".local" / "xPacks" / "@xpack-dev-tools" / "openocd"
+    if xpack_root.is_dir():
+        candidates.extend(sorted(xpack_root.glob("*/.content/bin/openocd.exe"), reverse=True))
+    chocolatey = os.environ.get("ChocolateyInstall")
+    if chocolatey:
+        candidates.append(Path(chocolatey) / "bin" / "openocd.exe")
+
+    def validate(executable):
+        if os.path.basename(executable).casefold() != "openocd.exe" or not os.path.isfile(executable):
+            raise FileNotFoundError(executable)
+
+    return _unique_existing_paths(candidates, validate)
 
 
 def resolve_openocd_config(executable, value, subfolder):
@@ -574,8 +662,11 @@ class ProjectConfig:
 class LiveWatchDB:
     def __init__(self):
         base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-        self.conn = sqlite3.connect(os.path.join(base_dir, "live_watch_history.db"))
+        self.path = os.path.join(base_dir, "live_watch_history.db")
+        self.conn = sqlite3.connect(self.path)
         self.cursor = self.conn.cursor()
+        self.cursor.execute("PRAGMA journal_mode=WAL")
+        self.cursor.execute("PRAGMA synchronous=NORMAL")
         try:
             self.cursor.execute("SELECT offset, base_var FROM variables LIMIT 1")
         except sqlite3.OperationalError:
@@ -588,6 +679,18 @@ class LiveWatchDB:
             )''')
         self.cursor.execute('CREATE TABLE IF NOT EXISTS config_cache (key TEXT PRIMARY KEY, value TEXT)')
         self.cursor.execute('CREATE TABLE IF NOT EXISTS c_code_cache (id INTEGER PRIMARY KEY, code TEXT)')
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sample_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                time_ms REAL NOT NULL,
+                variable TEXT NOT NULL,
+                value REAL NOT NULL
+            )''')
+        self.cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_sample_history_lookup '
+            'ON sample_history(session_id, variable, time_ms)'
+        )
         self.conn.commit()
         self._vars_cache = None
 
@@ -655,3 +758,20 @@ class LiveWatchDB:
         self.cursor.execute("SELECT code FROM c_code_cache WHERE id=1")
         row = self.cursor.fetchone()
         return row[0] if row else ""
+
+    def get_sample_history(self, variable, session_id=None):
+        if session_id is None:
+            self.cursor.execute(
+                "SELECT session_id FROM sample_history WHERE variable=? ORDER BY id DESC LIMIT 1",
+                (variable,),
+            )
+            row = self.cursor.fetchone()
+            if row is None:
+                return []
+            session_id = row[0]
+        self.cursor.execute(
+            "SELECT time_ms, value FROM sample_history "
+            "WHERE session_id=? AND variable=? ORDER BY time_ms, id",
+            (session_id, variable),
+        )
+        return self.cursor.fetchall()

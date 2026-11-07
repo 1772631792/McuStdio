@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import json
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 
 # Change this value to set the generated executable name.
@@ -114,6 +116,28 @@ def inspect_archive(executable: Path, env: dict[str, str]) -> None:
         raise RuntimeError("PyQt6 was not found in the packaged executable")
 
 
+def run_packaged_self_test(executable: Path, env: dict[str, str]) -> None:
+    """Make missing frozen imports fail by exit code instead of an error dialog."""
+    with tempfile.TemporaryDirectory(prefix="mcu_studio_self_test_") as directory:
+        report_path = Path(directory) / "report.json"
+        test_env = env.copy()
+        test_env["QT_QPA_PLATFORM"] = "offscreen"
+        result = subprocess.run(
+            [str(executable), "--self-test", str(report_path)],
+            cwd=PROJECT_ROOT,
+            env=test_env,
+            timeout=90,
+        )
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"Packaged self-test did not produce a valid report (exit {result.returncode})"
+            ) from exc
+        if result.returncode != 0 or not report.get("ok"):
+            raise RuntimeError("Packaged self-test failed:\n" + str(report.get("error") or report))
+
+
 def main() -> int:
     app_name = validate_app_name(APP_NAME)
     validate_project_layout()
@@ -148,10 +172,12 @@ def main() -> int:
         raise FileNotFoundError(f"PyInstaller did not create: {executable}")
 
     inspect_archive(executable, env)
+    run_packaged_self_test(executable, env)
     print(f"\nEntry point: {ENTRY_SCRIPT}")
     print(f"Application icon: {ICON_FILE}")
     print(f"Build succeeded: {executable}")
     print("Qt audit passed: PyQt6 only.")
+    print("Packaged startup self-test passed.")
     return 0
 
 

@@ -38,9 +38,15 @@ a = Analysis(
         'PySide6', 'shiboken6',
         'PyQt5', 'PySide2', 'shiboken2',
         'matplotlib', 'scipy',
+        # Plotting is explicitly raster/CPU based. pyqtgraph probes these
+        # optional modules but falls back cleanly when they are absent.
+        'PyQt6.QtOpenGL', 'PyQt6.QtOpenGLWidgets',
+        'PyQt6.QtPdf', 'PyQt6.QtTest',
+        'pyqtgraph.examples', 'pyqtgraph.console', 'pyqtgraph.jupyter',
+        'pyqtgraph.opengl',
     ],
     noarchive=False,
-    optimize=0,
+    optimize=1,
 )
 
 # Qt 6 on Windows links against the OS-provided ICU ABI.  The build host also
@@ -50,6 +56,17 @@ a.binaries = [
     entry for entry in a.binaries
     if os.path.basename(entry[0]).lower() != 'icuuc.dll'
     and not os.path.basename(entry[0]).lower().startswith('icudt')
+    and os.path.basename(entry[0]).lower() not in {
+        'qt6pdf.dll', 'qt6opengl.dll', 'qt6openglwidgets.dll',
+        'qpdf.dll', 'qgif.dll', 'qicns.dll', 'qtga.dll',
+        'qtiff.dll', 'qwbmp.dll', 'qwebp.dll',
+    }
+]
+# Application strings are Chinese and no QTranslator is installed. Native
+# Windows dialogs use the OS language, so bundling every Qt locale is unused.
+a.datas = [
+    entry for entry in a.datas
+    if '/translations/' not in entry[0].replace('\\', '/').lower()
 ]
 pyz = PYZ(a.pure)
 

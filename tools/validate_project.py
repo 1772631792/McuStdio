@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import compileall
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -12,6 +13,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from unittest.mock import patch
 
 
@@ -31,6 +33,7 @@ def validate_compilation() -> None:
         PROJECT_ROOT / "main.py",
         PROJECT_ROOT / "build.py",
         PROJECT_ROOT / "packaging" / "Mcu_Studio.spec",
+        PROJECT_ROOT / "tools" / "regression_matrix.py",
         Path(__file__),
     ]
     for path in files:
@@ -70,6 +73,16 @@ def validate_imports_and_elf_helpers() -> None:
         workers.LowSpeedReadWorker.__name__ == "LowSpeedReadWorker"
         and workers.BackendReconnectWorker.__name__ == "BackendReconnectWorker",
         "non-blocking read and reconnect workers import",
+    )
+    write_config = core.ProjectConfig()
+    write_worker = workers.VariableWriteWorker(write_config)
+    first_sequence = write_worker.submit("gain", 0x20000000, b"\x01", 1)
+    second_sequence = write_worker.submit("gain", 0x20000000, b"\x02", 2)
+    check(
+        second_sequence == first_sequence + 1
+        and len(write_worker._pending) == 1
+        and write_worker._pending["gain"][2] == b"\x02",
+        "slider writes keep only the newest pending value per variable",
     )
     read_channels = [
         {"ch_idx": 0, "addr": 0x20000000, "width": 4},
@@ -276,6 +289,125 @@ def validate_imports_and_elf_helpers() -> None:
             and studio.centralWidget().layout().stretch(1) == 1,
             "toolbars stay compact while the workspace receives all spare height",
         )
+        float_profile = ui.automatic_slider_profile(12.5, {"kind": "scalar", "size": 4, "encoding": 0x04}, "float")
+        int_profile = ui.automatic_slider_profile(100, {"kind": "scalar", "size": 1, "encoding": 0x07}, "uint8_t")
+        check(
+            float_profile[0] < 12.5 < float_profile[1]
+            and 0 < float_profile[2] < 1
+            and int_profile == (0.0, 255.0, 2.0)
+            and ui.InlineVariableSlider.__name__ == "InlineVariableSlider",
+            "variable slider ranges and steps are derived from type and current value",
+        )
+        studio.db.save_var("slider_value", "float", 0, "0x20000020", 0)
+        studio.inject_var_to_tree_ui("slider_value", "float", 0)
+        slider_item = next(
+            studio.debug_trees[0].topLevelItem(index)
+            for index in range(studio.debug_trees[0].topLevelItemCount())
+            if studio.debug_trees[0].topLevelItem(index).text(0) == "slider_value"
+        )
+        check(
+            studio.enable_inline_slider(
+                studio.debug_trees[0], slider_item, "slider_value",
+                {"min": -5.0, "max": 5.0, "step": 0.1, "live_write": False},
+            )
+            and isinstance(studio.inline_slider_widgets.get("0:slider_value"), ui.InlineVariableSlider)
+            and studio.inline_slider_widgets["0:slider_value"].plus_button.text() == "+"
+            and studio.debug_trees[0].itemWidget(slider_item, 2) is None
+            and studio.inline_slider_contexts["0:slider_value"][2].isFirstColumnSpanned()
+            and studio.debug_trees[0].itemWidget(studio.inline_slider_contexts["0:slider_value"][2], 0)
+                is studio.inline_slider_widgets["0:slider_value"]
+            and "0:slider_value" in studio.inline_slider_states,
+            "numeric watches open a persisted full-width slider row directly below the variable",
+        )
+        slider_widget = studio.inline_slider_widgets["0:slider_value"]
+        studio.handle_tree_item_double_clicked(slider_item, 2)
+        check(
+            studio.inline_slider_widgets["0:slider_value"] is slider_widget
+            and studio.debug_trees[0].itemWidget(slider_item, 2) is None,
+            "double-clicking a controlled variable cannot replace its dedicated slider panel",
+        )
+        slider_widget.value = 1.0
+        slider_widget.user_editing = True
+        slider_widget.update_from_target(3.0)
+        value_during_drag = slider_widget.value
+        slider_widget.user_editing = False
+        slider_widget.update_from_target(3.0)
+        check(
+            value_during_drag == 1.0
+            and slider_widget.value == 3.0
+            and math.isclose(slider_widget._quantize(3.06), 3.1, rel_tol=0.0, abs_tol=1e-12)
+            and not slider_widget.live_write,
+            "target readback cannot override an active gesture and slider values follow the configured step",
+        )
+        slider_widget.apply_state({
+            "min": -1.0, "max": 1.0, "step": 0.1,
+            "live_write": False, "auto_range": True,
+        })
+        slider_widget.value = 1.0
+        slider_widget._step_by(1)
+        check(
+            slider_widget.value > 1.0
+            and slider_widget.maximum > 1.0
+            and slider_widget.minus_button.autoRepeat()
+            and slider_widget.plus_button.autoRepeat()
+            and slider_widget.slider.focusPolicy() == Qt.FocusPolicy.StrongFocus,
+            "slider arrows and held step buttons adjust values and automatically expand the range",
+        )
+        stale_read_key = (0x20000020, 4)
+        slider_item.setText(2, "0.0500")
+        studio.low_speed_pending = {
+            (0, "slider_value"): (slider_item, stale_read_key, None, "float", None),
+        }
+        studio._finish_low_speed_read({stale_read_key: struct.pack("<f", 0.05)}, "")
+        check(
+            slider_item.text(2) == "0.0500"
+            and studio.inline_slider_widgets["0:slider_value"] is slider_widget
+            and math.isclose(slider_widget.value, 0.05, abs_tol=1e-6),
+            "low-speed readback updates both the ordinary table value and dedicated slider panel",
+        )
+        studio.db.save_var("slider_value_2", "float", 0, "0x20000024", 0)
+        studio.inject_var_to_tree_ui("slider_value_2", "float", 0)
+        slider_item_2 = next(
+            studio.debug_trees[0].topLevelItem(index)
+            for index in range(studio.debug_trees[0].topLevelItemCount())
+            if studio.debug_trees[0].topLevelItem(index).text(0) == "slider_value_2"
+        )
+        check(
+            studio.enable_inline_slider(
+                studio.debug_trees[0], slider_item_2, "slider_value_2",
+                {"min": 0.0, "max": 10.0, "step": 0.5},
+            )
+            and len(studio.inline_slider_widgets) == 2
+            and studio.inline_slider_widgets["0:slider_value"] is slider_widget
+            and studio.inline_slider_widgets["0:slider_value_2"].step == 0.5,
+            "multiple variables keep independent full-width slider rows at the same time",
+        )
+        studio.disable_inline_slider(studio.debug_trees[0], slider_item_2, "slider_value_2")
+        check(
+            "0:slider_value" in studio.inline_slider_widgets
+            and "0:slider_value_2" not in studio.inline_slider_widgets,
+            "one slider row can be removed without affecting the others",
+        )
+        studio.db.delete_var("slider_value_2", 0)
+        studio.debug_trees[0].takeTopLevelItem(studio.debug_trees[0].indexOfTopLevelItem(slider_item_2))
+        history_session = "validation-session"
+        studio.history_writer.submit([
+            (history_session, 1.0, "slider_value", 0.1),
+            (history_session, 2.0, "slider_value", 0.2),
+        ])
+        history_rows = []
+        for _attempt in range(40):
+            time.sleep(0.05)
+            history_rows = test_database.get_sample_history("slider_value", history_session)
+            if len(history_rows) == 2:
+                break
+        check(
+            history_rows == [(1.0, 0.1), (2.0, 0.2)],
+            "waveform history is batch-persisted by a dedicated SQLite writer",
+        )
+        studio.disable_inline_slider(studio.debug_trees[0], slider_item, "slider_value")
+        studio.db.delete_var("slider_value", 0)
+        studio.debug_trees[0].takeTopLevelItem(studio.debug_trees[0].indexOfTopLevelItem(slider_item))
         action_buttons = (
             studio.btn_disconnect,
             studio.btn_reconnect,
@@ -623,6 +755,8 @@ def validate_openocd_configuration() -> None:
     from mcu_studio.core import (
         ProjectConfig,
         default_openocd_executable,
+        discover_jlink_directories,
+        discover_openocd_executables,
         discover_openocd_configs,
         launch_openocd,
         resolve_openocd_config,
@@ -646,6 +780,19 @@ def validate_openocd_configuration() -> None:
     )
     check("gdb port disabled" in args and "telnet port disabled" in args, "unused OpenOCD ports are disabled")
     check(Path(default_openocd_executable()).is_file(), "bundled OpenOCD is discoverable")
+    with tempfile.TemporaryDirectory() as discovery_dir:
+        discovery_root = Path(discovery_dir)
+        preferred_openocd = discovery_root / "openocd.exe"
+        preferred_openocd.touch()
+        preferred_jlink = discovery_root / "JLink"
+        preferred_jlink.mkdir()
+        dll_name = "JLink_x64.dll" if struct.calcsize("P") == 8 else "JLinkARM.dll"
+        (preferred_jlink / dll_name).touch()
+        check(
+            discover_openocd_executables(str(preferred_openocd))[0] == str(preferred_openocd)
+            and discover_jlink_directories(str(preferred_jlink))[0] == str(preferred_jlink),
+            "persisted debugger paths take priority over automatic discovery",
+        )
     result = subprocess.run(
         [config.openocd_exe, *args, "-c", "shutdown"],
         cwd=Path(config.openocd_exe).parent,
@@ -815,6 +962,18 @@ def validate_git_whitespace() -> None:
     check(result.returncode == 0, "Git diff has no whitespace errors")
 
 
+def validate_combinatorial_matrix() -> None:
+    from tools import regression_matrix
+
+    results = {
+        "workflows": regression_matrix.validate_user_workflow_matrix(),
+        "numeric": regression_matrix.validate_numeric_matrix(),
+        "queues": regression_matrix.validate_queue_matrix(),
+        "discovery": regression_matrix.validate_discovery_matrix(),
+    }
+    check(sum(results.values()) == 500, "500 combinatorial user and component scenarios pass")
+
+
 def main() -> int:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     validate_compilation()
@@ -824,6 +983,7 @@ def main() -> int:
     validate_openocd_flash_worker()
     validate_jlink_bitness_and_flash_command()
     validate_large_watch_database()
+    validate_combinatorial_matrix()
     validate_no_second_qt_binding()
     validate_git_whitespace()
     print("\nProject validation passed without accessing hardware.")

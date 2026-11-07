@@ -1,6 +1,8 @@
 """MCU Live Watch Studio application package."""
 
-__all__ = ["run_application"]
+__version__ = "2.0.0"
+
+__all__ = ["__version__", "run_application"]
 
 
 def run_application() -> int:

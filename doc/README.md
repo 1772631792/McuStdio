@@ -17,7 +17,6 @@
 ## 版本记录
 
 - [更新记录](releases/CHANGELOG.md)
-- [V2.1 发布说明](releases/RELEASE_NOTES_V2.1.md)
 - [V2.0 发布说明](releases/RELEASE_NOTES_V2.0.md)
 
 ## 常见任务速查

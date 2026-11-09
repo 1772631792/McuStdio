@@ -1,6 +1,6 @@
-# MCU Live Watch Studio V2.0
+# MCU Live Watch Studio V2.2
 
-V2.0 将 MCU Live Watch Studio 扩展为时域、频域和在线调参一体化工具，同时改进调试工具发现、多项目配置、便携打包和关闭安全性。
+V2.2 将 MCU Live Watch Studio 扩展为时域、频域和在线调参一体化工具，同时改进调试工具发现、多项目配置、便携打包和关闭安全性。
 
 ## 主要更新
 

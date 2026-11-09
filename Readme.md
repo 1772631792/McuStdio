@@ -1,14 +1,14 @@
-# MCU Live Watch Studio V2.0
+# MCU Live Watch Studio V2.2
 
 一个轻量的 Cortex-M 实时变量监视、波形分析与固件烧录工具。
 
 它直接通过 ELF/DWARF 找到变量，再使用 SEGGER J-Link DLL 或 OpenOCD 读写 MCU 内存。固件不需要增加串口协议，也不需要为了观察变量而暂停正在运行的控制系统。适合电机控制、数字电源、传感器、PID 调参和现场状态分析。
 
-![MCU Live Watch Studio V2.0 多变量滑动调参与实时波形](assets/screenshots/v2-workspace-sliders.png)
+![MCU Live Watch Studio V2.2 多变量滑动调参与实时波形](assets/screenshots/v2-workspace-sliders.png)
 
-## MCU Live Watch Studio V2.0
+## MCU Live Watch Studio V2.2
 
-V2.0 在实时变量示波器和在线调参基础上加入独立 FFT 频域分析，并完善工具链发现与安全返回配置流程：在同一个工作区中完成 ELF 变量浏览、多个变量滑动调节、时域/频域分析、CSV 导出、固件烧录和断线重连。
+V2.2 在实时变量示波器和在线调参基础上加入独立 FFT 频域分析，并完善工具链发现与安全返回配置流程：在同一个工作区中完成 ELF 变量浏览、多个变量滑动调节、时域/频域分析、CSV 导出、固件烧录和断线重连。
 
 - 多个变量可以同时展开整宽滑动条，范围、步进和写入方式互相独立。
 - 支持拖动、点击滑轨、键盘方向键以及减号/加号长按连续调节，走到边界自动扩展范围。
@@ -28,14 +28,14 @@ V2.0 在实时变量示波器和在线调参基础上加入独立 FFT 频域分�
 
 ### 下载版使用
 
-发布附件见 [MCU Live Watch Studio V2.0](https://github.com/1772631792/McuStdio/releases/tag/v2.0.0)。
+发布附件见 [MCU Live Watch Studio V2.2](https://github.com/1772631792/McuStdio/releases/tag/v2.2.0)。
 
 1. `Mcu_Studio.exe`：单文件版，适合已经安装 SEGGER J-Link Software 的用户。
 2. `OpenOCD.zip`：独立 OpenOCD 运行包，可与单文件版搭配使用。
 3. `Mcu_Studio_Portable.zip`：内置 OpenOCD 的完整目录版，解压后整体使用。
 4. 单文件版会优先使用 EXE 同级已有的 `live_watch_history.db`，没有时才使用 `%LOCALAPPDATA%\McuStudio`；目录版放在自身的 `data/` 子目录。
 
-完整变更见 [V2.0 发布说明](doc/releases/RELEASE_NOTES_V2.0.md)。
+完整变更见 [V2.2 发布说明](doc/releases/RELEASE_NOTES_V2.2.md)。
 
 ## 设计目标
 

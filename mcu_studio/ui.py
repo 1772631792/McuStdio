@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QFormLayout, QCheckBox as _QCheckBox, QSplitter, QTextEdit,
                              QRadioButton, QButtonGroup, QTabWidget, QFrame, QTabBar,
                              QStyle, QStyleOptionButton, QProgressBar, QSlider, QScrollArea,
-                             QSpinBox)
+                             QSpinBox, QInputDialog)
 from PyQt6.QtCore import (QTimer, Qt, QEvent, pyqtSignal, QVariantAnimation, QMutex,
                           QMutexLocker, QPointF, QRectF, QSize, QThread, QEventLoop)
 from PyQt6.QtGui import (QFont, QKeyEvent, QIntValidator, QDoubleValidator, QColor,
@@ -296,6 +296,8 @@ DARK_STYLE = """
     QPushButton:disabled { background-color: #1d1d1d; color: #626262; border-color: #2a2a2a; }
     QPushButton#primaryButton { background-color: #0e639c; border-color: #0e639c; color: #ffffff; font-weight: 700; }
     QPushButton#primaryButton:hover { background-color: #1177bb; }
+    QPushButton#profileAddButton { min-height: 30px; padding: 0; color: #64b5ff; font-size: 20px; font-weight: 500; }
+    QPushButton#profileDeleteButton { min-height: 30px; padding: 0; color: #ff6961; font-size: 19px; font-weight: 500; }
     QPushButton#backConfigButton { background-color: #252a32; border: 1px solid #465264; color: #d8e8f8; border-radius: 9px; padding: 0px; }
     QPushButton#backConfigButton:hover { background-color: #2e4058; border-color: #5b8fc4; color: #ffffff; }
     QPushButton#backConfigButton:pressed { background-color: #20344c; }
@@ -367,6 +369,8 @@ LIGHT_STYLE = """
     QPushButton:disabled { background-color: #f1f5f9; color: #94a3b8; border: 1px solid #e2e8f0; }
     QPushButton#primaryButton { background-color: #007aff; border-color: #007aff; color: #ffffff; font-weight: 700; }
     QPushButton#primaryButton:hover { background-color: #2188ff; }
+    QPushButton#profileAddButton { min-height: 30px; padding: 0; color: #007aff; font-size: 20px; font-weight: 500; }
+    QPushButton#profileDeleteButton { min-height: 30px; padding: 0; color: #d92d20; font-size: 19px; font-weight: 500; }
     QPushButton#backConfigButton { background-color: #f7faff; border: 1px solid #b9cbe0; color: #24557f; border-radius: 9px; padding: 0px; }
     QPushButton#backConfigButton:hover { background-color: #e8f2ff; border-color: #7aaee0; color: #123d63; }
     QPushButton#backConfigButton:pressed { background-color: #dcecff; }
@@ -1001,8 +1005,16 @@ class LoginConfigDialog(QDialog):
         self.discovery_worker = None
         self.enable_global_discovery = bool(enable_global_discovery)
         self.setWindowTitle(f"MCU Live Watch Studio V{__version__}")
-        self.resize(780, 620)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setMinimumSize(760, 600)
+        self.resize(900, 680)
         self.init_ui()
+        self.load_profiles()
         self.load_saved_config()
         self.toggle_engine_fields()
 
@@ -1020,6 +1032,32 @@ class LoginConfigDialog(QDialog):
         form.setVerticalSpacing(9)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
+        self.profile_combo = QComboBox()
+        self.profile_combo.setToolTip("切换项目配置；主配置固定保留")
+        self.profile_combo.currentIndexChanged.connect(self.profile_changed)
+        self.btn_profile_add = QPushButton("+")
+        self.btn_profile_add.setObjectName("profileAddButton")
+        self.btn_profile_add.setFixedWidth(36)
+        self.btn_profile_add.setToolTip("新建配置")
+        self.btn_profile_add.clicked.connect(self.create_profile)
+        self.btn_profile_delete = QPushButton("×")
+        self.btn_profile_delete.setObjectName("profileDeleteButton")
+        self.btn_profile_delete.setFixedWidth(36)
+        self.btn_profile_delete.setToolTip("删除当前配置；主配置不能删除")
+        self.btn_profile_delete.clicked.connect(self.delete_current_profile)
+        self.btn_profile_clear = QPushButton("清空配置")
+        self.btn_profile_clear.setProperty("commandButton", True)
+        self.btn_profile_clear.setFixedWidth(82)
+        self.btn_profile_clear.setToolTip("保留配置名称，清除该配置内的工程和工作区数据")
+        self.btn_profile_clear.clicked.connect(self.clear_current_profile)
+        profile_row = QHBoxLayout()
+        profile_row.setSpacing(6)
+        profile_row.addWidget(self.profile_combo, 1)
+        profile_row.addWidget(self.btn_profile_add)
+        profile_row.addWidget(self.btn_profile_delete)
+        profile_row.addWidget(self.btn_profile_clear)
+        form.addRow("项目配置", profile_row)
+
         appearance_section = QLabel("外观与固件")
         appearance_section.setObjectName("sectionTitle")
         form.addRow(appearance_section)
@@ -1031,8 +1069,9 @@ class LoginConfigDialog(QDialog):
         
         self.elf_edit = QLineEdit()
         btn_elf = QPushButton("浏览…")
+        btn_elf.setFixedWidth(76)
         btn_elf.clicked.connect(lambda: self.select_file(self.elf_edit, "选择 ELF 固件", "ELF Files (*.elf)"))
-        h1 = QHBoxLayout(); h1.addWidget(self.elf_edit); h1.addWidget(btn_elf)
+        h1 = QHBoxLayout(); h1.setSpacing(6); h1.addWidget(self.elf_edit, 1); h1.addWidget(btn_elf)
         form.addRow("ELF 固件", h1)
 
         backend_section = QLabel("调试后端")
@@ -1049,20 +1088,22 @@ class LoginConfigDialog(QDialog):
         self.jlink_dir_edit.activated.connect(lambda _index: self.static_env_check())
         self.jlink_dir_edit.lineEdit().editingFinished.connect(self.static_env_check)
         self.btn_jl_dir = QPushButton("浏览…")
+        self.btn_jl_dir.setFixedWidth(76)
         self.btn_jl_dir.clicked.connect(self.select_jlink_dir)
         self.btn_detect_jlink = QPushButton("扫描电脑")
         self.btn_detect_jlink.setProperty("commandButton", True)
-        self.btn_detect_jlink.setMinimumWidth(92)
+        self.btn_detect_jlink.setFixedWidth(88)
         self.btn_detect_jlink.setToolTip("立即检测常见位置，并在后台扫描本机所有固定磁盘")
         self.btn_detect_jlink.clicked.connect(self.auto_detect_jlink)
-        self.h_jl_dir = QHBoxLayout(); self.h_jl_dir.addWidget(self.jlink_dir_edit); self.h_jl_dir.addWidget(self.btn_jl_dir); self.h_jl_dir.addWidget(self.btn_detect_jlink)
+        self.h_jl_dir = QHBoxLayout(); self.h_jl_dir.setSpacing(6); self.h_jl_dir.addWidget(self.jlink_dir_edit, 1); self.h_jl_dir.addWidget(self.btn_jl_dir); self.h_jl_dir.addWidget(self.btn_detect_jlink)
 
         self.lbl_jl_dev = QLabel("目标器件")
         self.jlink_device_edit = QLineEdit("Cortex-M0+")
         self.jlink_device_edit.textEdited.connect(lambda text: self.jlink_device_edit.setProperty("connect_device", text.strip()))
         self.btn_jl_device = QPushButton("选择芯片…")
+        self.btn_jl_device.setFixedWidth(92)
         self.btn_jl_device.clicked.connect(self.open_jlink_device_selector)
-        self.h_jl_device = QHBoxLayout(); self.h_jl_device.addWidget(self.jlink_device_edit); self.h_jl_device.addWidget(self.btn_jl_device)
+        self.h_jl_device = QHBoxLayout(); self.h_jl_device.setSpacing(6); self.h_jl_device.addWidget(self.jlink_device_edit, 1); self.h_jl_device.addWidget(self.btn_jl_device)
 
         form.addRow(self.lbl_jl_dir, self.h_jl_dir)
         form.addRow(self.lbl_jl_dev, self.h_jl_device)
@@ -1072,27 +1113,30 @@ class LoginConfigDialog(QDialog):
         self.openocd_edit.activated.connect(lambda _index: self.refresh_openocd_cfgs())
         self.openocd_edit.lineEdit().editingFinished.connect(self.refresh_openocd_cfgs)
         self.btn_ocd = QPushButton("浏览…")
+        self.btn_ocd.setFixedWidth(76)
         self.btn_ocd.clicked.connect(self.select_openocd_executable)
         self.btn_detect_openocd = QPushButton("扫描电脑")
         self.btn_detect_openocd.setProperty("commandButton", True)
-        self.btn_detect_openocd.setMinimumWidth(92)
+        self.btn_detect_openocd.setFixedWidth(88)
         self.btn_detect_openocd.setToolTip("立即检测常见位置，并在后台扫描本机所有固定磁盘")
         self.btn_detect_openocd.clicked.connect(self.auto_detect_openocd)
-        self.h_ocd_exe = QHBoxLayout(); self.h_ocd_exe.addWidget(self.openocd_edit); self.h_ocd_exe.addWidget(self.btn_ocd); self.h_ocd_exe.addWidget(self.btn_detect_openocd)
+        self.h_ocd_exe = QHBoxLayout(); self.h_ocd_exe.setSpacing(6); self.h_ocd_exe.addWidget(self.openocd_edit, 1); self.h_ocd_exe.addWidget(self.btn_ocd); self.h_ocd_exe.addWidget(self.btn_detect_openocd)
 
         self.lbl_ocd_intf = QLabel("探针配置")
         self.interface_combo = QComboBox()
         self.interface_combo.setEditable(True)
         self.btn_browse_intf = QPushButton("浏览…")
+        self.btn_browse_intf.setFixedWidth(76)
         self.btn_browse_intf.clicked.connect(lambda: self.select_cfg_file(self.interface_combo, "interface"))
-        self.h_ocd_intf = QHBoxLayout(); self.h_ocd_intf.addWidget(self.interface_combo); self.h_ocd_intf.addWidget(self.btn_browse_intf)
+        self.h_ocd_intf = QHBoxLayout(); self.h_ocd_intf.setSpacing(6); self.h_ocd_intf.addWidget(self.interface_combo, 1); self.h_ocd_intf.addWidget(self.btn_browse_intf)
 
         self.lbl_ocd_targ = QLabel("目标配置")
         self.target_combo = QComboBox()
         self.target_combo.setEditable(True)
         self.btn_browse_target = QPushButton("浏览…")
+        self.btn_browse_target.setFixedWidth(76)
         self.btn_browse_target.clicked.connect(lambda: self.select_cfg_file(self.target_combo, "target"))
-        self.h_ocd_targ = QHBoxLayout(); self.h_ocd_targ.addWidget(self.target_combo); self.h_ocd_targ.addWidget(self.btn_browse_target)
+        self.h_ocd_targ = QHBoxLayout(); self.h_ocd_targ.setSpacing(6); self.h_ocd_targ.addWidget(self.target_combo, 1); self.h_ocd_targ.addWidget(self.btn_browse_target)
 
         form.addRow(self.lbl_ocd_exe, self.h_ocd_exe)
         form.addRow(self.lbl_ocd_intf, self.h_ocd_intf)
@@ -1128,6 +1172,93 @@ class LoginConfigDialog(QDialog):
         btns.addWidget(self.btn_connect)
         layout.addLayout(btns)
         self.setLayout(layout)
+
+    def load_profiles(self, selected_id=None):
+        selected_id = int(selected_id or self.db.active_profile_id)
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+        selected_index = 0
+        for index, (profile_id, name, is_main) in enumerate(self.db.list_profiles()):
+            self.profile_combo.addItem(str(name), (int(profile_id), bool(is_main)))
+            if int(profile_id) == selected_id:
+                selected_index = index
+        self.profile_combo.setCurrentIndex(selected_index)
+        self.profile_combo.blockSignals(False)
+        self.update_profile_actions()
+
+    def current_profile_record(self):
+        data = self.profile_combo.currentData()
+        return data if isinstance(data, tuple) and len(data) == 2 else (1, True)
+
+    def update_profile_actions(self):
+        _profile_id, is_main = self.current_profile_record()
+        self.btn_profile_delete.setEnabled(not is_main)
+
+    def profile_changed(self, index):
+        if index < 0:
+            return
+        profile_id, _is_main = self.current_profile_record()
+        if int(profile_id) == int(self.db.active_profile_id):
+            self.update_profile_actions()
+            return
+        self.stop_global_discovery()
+        self.db.set_active_profile(profile_id)
+        self.load_saved_config()
+        self.toggle_engine_fields()
+        self.update_profile_actions()
+
+    def create_profile(self):
+        default_name = f"配置 {len(self.db.list_profiles()) + 1}"
+        name, accepted = QInputDialog.getText(self, "新建配置", "配置名称", text=default_name)
+        if not accepted:
+            return
+        try:
+            profile_id = self.db.create_profile(name)
+        except ValueError as exc:
+            QMessageBox.warning(self, "无法新建配置", str(exc))
+            return
+        self.load_profiles(profile_id)
+        self.load_saved_config()
+        self.toggle_engine_fields()
+
+    def delete_current_profile(self):
+        profile_id, is_main = self.current_profile_record()
+        if is_main:
+            QMessageBox.information(self, "主配置", "主配置固定保留，不能删除。")
+            return
+        name = self.profile_combo.currentText()
+        answer = QMessageBox.question(
+            self,
+            "删除配置",
+            f"确定删除“{name}”及其变量、波形和历史数据吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.db.delete_profile(profile_id)
+        self.load_profiles(1)
+        self.load_saved_config()
+        self.toggle_engine_fields()
+
+    def clear_current_profile(self):
+        profile_id, _is_main = self.current_profile_record()
+        name = self.profile_combo.currentText()
+        answer = QMessageBox.question(
+            self,
+            "清空配置",
+            f"确定清空“{name}”吗？\n\n"
+            "配置名称会保留；数据库中的 UI 状态、工程设置、变量、波形绑定和用于 CSV 导出的历史采样将被删除。\n"
+            "已经导出到磁盘的 CSV 文件不会删除。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.db.clear_profile(profile_id)
+        self.load_saved_config()
+        self.toggle_engine_fields()
+        self.lbl_hardware_status.setText(f"已清空配置：{name}")
 
     def toggle_engine_fields(self):
         is_jlink = (self.driver_mode_combo.currentIndex() == 0)
@@ -1444,6 +1575,7 @@ class LoginConfigDialog(QDialog):
 
     def load_saved_config(self):
         self.elf_edit.setText(self.db.get_config("elf_path"))
+        self.openocd_edit.clear()
         saved_openocd = self.db.get_config("openocd_exe", "").strip() or default_openocd_executable()
         cached_openocd = self._cached_path_list(self.db.get_config("discovered_openocd_paths", "[]"))
         remembered_openocd = [saved_openocd]
@@ -1454,6 +1586,7 @@ class LoginConfigDialog(QDialog):
         self._merge_path_choices(self.openocd_edit, remembered_openocd, saved_openocd)
         self.refresh_openocd_cfgs()
         saved_jlink = self.db.get_config("jlink_dll_dir", "C:\\Program Files\\SEGGER\\JLink")
+        self.jlink_dir_edit.clear()
         cached_jlink = self._cached_path_list(self.db.get_config("discovered_jlink_paths", "[]"))
         remembered_jlink = [saved_jlink]
         for path in cached_jlink:
@@ -2359,7 +2492,9 @@ class MCUStudioWindow(QMainWindow):
         self.variable_write_worker.start()
         self.history_session_id = f"{int(time.time() * 1000)}-{os.getpid()}"
         self.history_last_saved_ms = {}
-        self.history_writer = SampleHistoryWriter(self.db.path, self)
+        self.history_writer = SampleHistoryWriter(
+            self.db.path, self.db.active_profile_id, self
+        )
         self.history_writer.error_signal.connect(self._history_write_failed)
         self.history_writer.start()
         self.workspace_save_timer = QTimer(self)

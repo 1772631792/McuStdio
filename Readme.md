@@ -6,7 +6,7 @@
 
 ![MCU Live Watch Studio V2.1 多变量滑动调参与实时波形](assets/screenshots/v2-workspace-sliders.png)
 
-## V2.1 频谱分析版
+## MCU Live Watch Studio V2.1
 
 V2.1 在实时变量示波器和在线调参基础上加入独立 FFT 频域分析，并完善工具链发现与安全返回配置流程：在同一个工作区中完成 ELF 变量浏览、多个变量滑动调节、时域/频域分析、CSV 导出、固件烧录和断线重连。
 
@@ -15,17 +15,25 @@ V2.1 在实时变量示波器和在线调参基础上加入独立 FFT 频域分�
 - 每个波形视图可独立切换 FFT，显示基波、谐波百分比、THD、线性幅值或 dBc，并支持暂停后吸附频谱点。
 - J-Link 原生与 OpenOCD 双后端；点击“扫描电脑”后查找本机固定磁盘，结果保存在可编辑下拉框中，启动时不会自动扫描。
 - 工作站可以安全返回配置，返回和关闭只释放采样与调试连接，不主动发送复位、暂停或烧录命令。
+- 一个数据库可保存多套项目配置；启动页用紧凑下拉框切换，`+` 新建、`×` 删除，固定的“主配置”不能删除。
 - 高频波形继续保存在内存，长期历史由后台线程批量写入 SQLite；CSV 自动合并数据库与内存尾部。
 - 低速读取、高速采样、变量写入、烧录、重连、ELF 解析和历史保存均不阻塞主界面。
 - 全项目回归覆盖 500 组用户与组件组合，并对最终 EXE 执行 PyQt6 和主界面启动自检。
 
+### 一个数据库，多套项目配置
+
+![MCU Live Watch Studio 多项目配置启动页](assets/screenshots/project-config-profiles.png)
+
+启动页通过简洁的下拉框管理项目配置：固定的“主配置”不能删除，`+` 新建配置，`×` 删除当前非主配置，“清空配置”保留名称但清除当前配置在数据库中的 UI 状态、ELF 与后端设置、监视变量、滑动条、波形绑定和历史采样。清空后的历史采样不再参与后续 CSV 导出；已经导出到磁盘的 CSV 文件不会被删除。
+
 ### 下载版使用
 
-发布附件见 [MCU Live Watch Studio V2.1 · 频谱分析版](https://github.com/1772631792/McuStdio/releases/tag/v2.1.0)。
+发布附件见 [MCU Live Watch Studio V2.1](https://github.com/1772631792/McuStdio/releases/tag/v2.1.0)。
 
-1. 只使用 SEGGER J-Link：下载 `Mcu_Studio.exe`，电脑安装 SEGGER J-Link Software 后直接运行。
-2. 使用 ST-Link、CMSIS-DAP/DAPLink 或 OpenOCD：同时下载 `OpenOCD.zip`，放在 EXE 同级并直接解压，得到 `OpenOCD/` 目录。
-3. 首次运行会在 EXE 同级创建 `live_watch_history.db`，保存配置、调节参数和受控容量的采样历史。
+1. `Mcu_Studio.exe`：单文件版，适合已经安装 SEGGER J-Link Software 的用户。
+2. `OpenOCD.zip`：独立 OpenOCD 运行包，可与单文件版搭配使用。
+3. `Mcu_Studio_Portable.zip`：内置 OpenOCD 的完整目录版，解压后整体使用。
+4. 单文件版会优先使用 EXE 同级已有的 `live_watch_history.db`，没有时才使用 `%LOCALAPPDATA%\McuStudio`；目录版放在自身的 `data/` 子目录。
 
 完整变更见 [V2.1 发布说明](doc/releases/RELEASE_NOTES_V2.1.md)。
 
@@ -33,7 +41,8 @@ V2.1 在实时变量示波器和在线调参基础上加入独立 FFT 频域分�
 
 - **保持 MCU 运行**：普通监视和波形采样不依赖断点，避免停机影响实时系统。
 - **变量优先**：搜索、结构展开、实时值和波形绑定都围绕变量组织，减少无关界面。
-- **配置轻量**：工作状态集中保存在一个 SQLite 文件中，复制 DB 即可切换项目配置。
+- **配置轻量**：工作状态集中保存在一个 SQLite 文件中，通过启动页下拉框切换项目配置。
+- **多项目配置**：同一个 DB 内隔离保存每套 ELF、探针、变量、滑动条、波形、布局和采样历史，无需反复复制数据库。
 - **后端解耦**：J-Link 原生和 OpenOCD 共用相同的 ELF、变量、波形与烧录流程。
 - **适合嵌入现有流程**：可以继续使用 VS Code、Make/CMake 或厂商工程编译，只把本软件作为实时观察窗口。
 
@@ -182,7 +191,7 @@ python -m pip install PyQt6 pyqtgraph numpy pyelftools pylink-square
 python .\main.py
 ```
 
-也可以直接运行打包后的 `Mcu_Studio.exe`。首次启动时会在程序同级创建 `live_watch_history.db`。
+也可以直接运行打包后的 `Mcu_Studio.exe`。单文件版优先读取 EXE 同级已有数据库，没有时保存到 `%LOCALAPPDATA%\McuStudio`；目录版保存在自身的 `data/` 子目录。
 
 ### 连接和使用
 
@@ -206,7 +215,7 @@ OpenOCD 连接、重连和烧录可能复位目标，具体行为取决于 targe
 - OpenOCD 使用统一 TCL 请求完成一轮高速采样，连续安全区间使用块读取。
 - 低速表格、高速采样、烧录和后端重连都在后台线程执行。
 - 变量滑条和表格编辑共用一个串行写入线程；J-Link 读写共享锁，OpenOCD 写入使用独立 TCL 连接，不阻塞 Qt 界面。
-- 采样历史由独立线程批量写入 SQLite WAL，8 kHz 波形显示不会逐点同步写数据库。
+- 采样历史由独立线程批量写入 SQLite，正常运行只保留一个主 DB；8 kHz 波形显示不会逐点同步写数据库。
 - 每个高速变量的历史缓存有上限；绘图最多使用约 4000 个峰值保留点。
 - 关闭窗口时会等待后台通信线程安全结束，避免 `QThread: Destroyed while thread is still running`。
 - ELF 文件变化会等待写入稳定后在后台线程重新提取，解析期间界面保持响应，失败时保留原有有效数据。
@@ -228,9 +237,17 @@ python -m pip install pyinstaller
 python .\build.py
 ```
 
-打包配置会排除未使用的 Qt PDF、测试、OpenGL、翻译和冷门图片插件。当前构建环境中单文件 EXE 由约 58.0 MB 降至约 51.8 MB；NumPy/OpenBLAS 与 Qt 核心图形库仍是主要体积来源，为保证波形和兼容性予以保留。
+打包配置会排除未使用的 Qt PDF、测试、翻译和冷门图片插件。`pyqtgraph` 启动需要 Qt OpenGL 辅助模块，即使当前曲线使用 CPU 光栅路径也必须保留；NumPy/OpenBLAS 与 Qt 核心图形库仍是主要体积来源。
 
 成品输出到 `dist/Mcu_Studio.exe`。`build.py` 强制使用 PyQt6，并检查产物中是否混入第二套 Qt。
+
+构建内置 OpenOCD 的目录版：
+
+```powershell
+python .\build_portable.py
+```
+
+成品位于 `dist/Mcu_Studio/`，发布和使用时必须整体复制。
 
 ## 项目结构
 
@@ -238,12 +255,13 @@ python .\build.py
 McuStdio/
 ├─ main.py                  # 应用入口
 ├─ build.py                 # PyInstaller 构建入口
+├─ build_portable.py        # 内置 OpenOCD 的目录版构建入口
 ├─ mcu_studio/             # UI、ELF/数据库核心和后台任务
 ├─ assets/                 # 应用图标与 README 截图
 ├─ runtime/OpenOCD/         # 内置 OpenOCD 与 cfg
 ├─ tools/                  # 无硬件校验工具
 ├─ doc/                    # 完整使用与维护文档
-└─ live_watch_history.db   # 本机工作状态（首次运行后生成）
+└─ live_watch_history.db   # 源码运行产生的本机工作状态
 ```
 
 更详细的连接、变量、烧录、数据库迁移、构建和故障排查说明见 [文档目录](doc/README.md)。第三方组件保留各自许可证。

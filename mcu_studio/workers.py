@@ -484,9 +484,10 @@ class SampleHistoryWriter(QThread):
     error_signal = pyqtSignal(str)
     MAX_ROWS = 1_000_000
 
-    def __init__(self, database_path, parent=None):
+    def __init__(self, database_path, profile_id, parent=None):
         super().__init__(parent)
         self.database_path = str(database_path)
+        self.profile_id = int(profile_id)
         self._condition = threading.Condition()
         self._pending = []
         self._running = True
@@ -504,7 +505,7 @@ class SampleHistoryWriter(QThread):
         connection = None
         try:
             connection = sqlite3.connect(self.database_path, timeout=5.0)
-            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=NORMAL")
             inserted_since_prune = 0
             while True:
@@ -518,16 +519,18 @@ class SampleHistoryWriter(QThread):
                 if not rows:
                     continue
                 connection.executemany(
-                    "INSERT INTO sample_history(session_id, time_ms, variable, value) VALUES (?, ?, ?, ?)",
-                    rows,
+                    "INSERT INTO sample_history(profile_id, session_id, time_ms, variable, value) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    ((self.profile_id, *row) for row in rows),
                 )
                 connection.commit()
                 inserted_since_prune += len(rows)
                 if inserted_since_prune >= 50_000:
                     connection.execute(
-                        "DELETE FROM sample_history WHERE id <= COALESCE(("
-                        "SELECT id FROM sample_history ORDER BY id DESC LIMIT 1 OFFSET ?), 0)",
-                        (self.MAX_ROWS,),
+                        "DELETE FROM sample_history WHERE profile_id=? AND id <= COALESCE(("
+                        "SELECT id FROM sample_history WHERE profile_id=? "
+                        "ORDER BY id DESC LIMIT 1 OFFSET ?), 0)",
+                        (self.profile_id, self.profile_id, self.MAX_ROWS),
                     )
                     connection.commit()
                     inserted_since_prune = 0

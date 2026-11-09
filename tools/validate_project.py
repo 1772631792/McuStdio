@@ -32,6 +32,7 @@ def validate_compilation() -> None:
     files = [
         PROJECT_ROOT / "main.py",
         PROJECT_ROOT / "build.py",
+        PROJECT_ROOT / "build_portable.py",
         PROJECT_ROOT / "packaging" / "Mcu_Studio.spec",
         PROJECT_ROOT / "tools" / "regression_matrix.py",
         Path(__file__),
@@ -270,6 +271,19 @@ def validate_imports_and_elf_helpers() -> None:
             and login.openocd_edit.count() >= 1
             and login.discovery_worker is None,
             "debugger dropdowns load remembered paths without scanning at startup",
+        )
+        check(
+            bool(login.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint)
+            and login.btn_jl_dir.width() == 76
+            and login.btn_detect_jlink.width() == 88,
+            "configuration window is resizable and keeps path action buttons compact",
+        )
+        check(
+            login.profile_combo.currentText() == "主配置"
+            and not login.btn_profile_delete.isEnabled()
+            and login.btn_profile_add.width() == 36
+            and login.btn_profile_delete.width() == 36,
+            "compact profile selector keeps the main profile undeletable",
         )
         hinted = login._friendly_openocd_error(
             "LIBUSB_ERROR_NOT_SUPPORTED\nError: No J-Link device found"
@@ -1084,7 +1098,7 @@ def validate_jlink_bitness_and_flash_command() -> None:
 
 
 def validate_large_watch_database() -> None:
-    from mcu_studio.core import LiveWatchDB
+    from mcu_studio.core import LiveWatchDB, application_data_dir
 
     with tempfile.TemporaryDirectory() as directory, patch.object(sys, "argv", [str(Path(directory) / "main.py")]):
         database = LiveWatchDB()
@@ -1094,7 +1108,127 @@ def validate_large_watch_database() -> None:
         ]
         database.replace_root_vars("state", 0, records)
         check(len(database.get_var_map(0)) == len(records), "large watch lists use one transaction and cached lookup")
+        check(
+            database.cursor.execute("PRAGMA journal_mode").fetchone()[0].casefold() == "delete",
+            "SQLite keeps persistent state in one database file",
+        )
         database.conn.close()
+        check(
+            not Path(f"{database.path}-wal").exists() and not Path(f"{database.path}-shm").exists(),
+            "database close leaves no WAL or SHM sidecar files",
+        )
+
+    with tempfile.TemporaryDirectory() as directory:
+        executable = Path(directory) / "Mcu_Studio.exe"
+        sibling_database = Path(directory) / "live_watch_history.db"
+        sibling_database.touch()
+        with patch.object(sys, "argv", [str(executable)]), patch.object(
+            sys, "frozen", True, create=True
+        ), patch.dict(os.environ, {"MCU_STUDIO_DATA_DIR": ""}):
+            check(
+                application_data_dir() == Path(directory),
+                "single-file build prefers an existing database beside the EXE",
+            )
+
+
+def validate_configuration_profiles() -> None:
+    import sqlite3
+
+    from mcu_studio.core import LiveWatchDB
+
+    with tempfile.TemporaryDirectory() as directory, patch.object(
+        sys, "argv", [str(Path(directory) / "main.py")]
+    ):
+        database = LiveWatchDB()
+        profiles = database.list_profiles()
+        check(
+            profiles == [(1, "主配置", 1)],
+            "a permanent main profile is created for every database",
+        )
+        database.save_config("elf_path", "main.elf")
+        database.save_var("main_value", "uint32_t", 0, "main_value", 0)
+        secondary_id = database.create_profile("电机控制板")
+        check(
+            database.active_profile_id == secondary_id
+            and database.get_config("elf_path") == ""
+            and database.get_all_vars() == [],
+            "new profiles start empty and isolated from the main profile",
+        )
+        database.save_config("elf_path", "motor.elf")
+        database.save_config("workspace_state_v1", '{"splitters":[1,2]}')
+        database.save_var("motor_value", "float", 0, "motor_value", 0)
+        database.cursor.execute(
+            "INSERT INTO sample_history(profile_id, session_id, time_ms, variable, value) "
+            "VALUES (?, 'motor-session', 1.0, 'motor_value', 2.5)",
+            (secondary_id,),
+        )
+        database.conn.commit()
+        database.set_active_profile(1)
+        check(
+            database.get_config("elf_path") == "main.elf"
+            and "main_value" in database.get_var_map(0)
+            and "motor_value" not in database.get_var_map(0),
+            "switching profiles restores independent project data",
+        )
+        database.set_active_profile(secondary_id)
+        database.clear_profile()
+        check(
+            any(row[0] == secondary_id for row in database.list_profiles())
+            and database.get_config("elf_path") == ""
+            and database.get_config("workspace_state_v1") == ""
+            and database.get_all_vars() == [],
+            "clearing a profile keeps its name while removing UI and variable data",
+        )
+        check(
+            database.get_sample_history("motor_value", "motor-session") == []
+            and database.cursor.execute(
+                "SELECT COUNT(*) FROM sample_history WHERE profile_id=?", (secondary_id,)
+            ).fetchone()[0] == 0,
+            "clearing a profile removes waveform history used by CSV export",
+        )
+        database.delete_profile(secondary_id)
+        check(
+            database.active_profile_id == 1
+            and database.list_profiles() == [(1, "主配置", 1)],
+            "deleting a secondary profile returns to the protected main profile",
+        )
+        try:
+            database.delete_profile(1)
+        except ValueError:
+            main_delete_rejected = True
+        else:
+            main_delete_rejected = False
+        check(main_delete_rejected, "the main profile cannot be deleted")
+        database.conn.close()
+
+    with tempfile.TemporaryDirectory() as directory, patch.object(
+        sys, "argv", [str(Path(directory) / "main.py")]
+    ):
+        legacy_path = Path(directory) / "live_watch_history.db"
+        legacy = sqlite3.connect(legacy_path)
+        legacy.execute(
+            "CREATE TABLE variables (name TEXT, type TEXT, offset INTEGER, base_var TEXT, "
+            "tab_idx INTEGER DEFAULT 0, PRIMARY KEY(name, tab_idx))"
+        )
+        legacy.execute("CREATE TABLE config_cache (key TEXT PRIMARY KEY, value TEXT)")
+        legacy.execute("CREATE TABLE c_code_cache (id INTEGER PRIMARY KEY, code TEXT)")
+        legacy.execute(
+            "CREATE TABLE sample_history (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "session_id TEXT, time_ms REAL, variable TEXT, value REAL)"
+        )
+        legacy.execute(
+            "INSERT INTO variables VALUES ('legacy_value', 'uint32_t', 0, 'legacy_value', 0)"
+        )
+        legacy.execute("INSERT INTO config_cache VALUES ('elf_path', 'legacy.elf')")
+        legacy.commit()
+        legacy.close()
+        migrated = LiveWatchDB()
+        check(
+            migrated.get_config("elf_path") == "legacy.elf"
+            and "legacy_value" in migrated.get_var_map(0),
+            "legacy single-configuration data migrates into the main profile",
+        )
+        migrated.conn.close()
 
 
 def validate_no_second_qt_binding() -> None:
@@ -1144,6 +1278,7 @@ def main() -> int:
     validate_openocd_flash_worker()
     validate_jlink_bitness_and_flash_command()
     validate_large_watch_database()
+    validate_configuration_profiles()
     validate_combinatorial_matrix()
     validate_no_second_qt_binding()
     validate_git_whitespace()

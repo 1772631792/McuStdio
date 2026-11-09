@@ -1,4 +1,4 @@
-# MCU Live Watch Studio V2.1 · 频谱分析版
+# MCU Live Watch Studio V2.1
 
 V2.1 将 MCU Live Watch Studio 从实时变量示波器进一步扩展为时域、频域和在线调参一体化工具，同时改进调试工具发现、配置切换和关闭安全性。
 
@@ -14,6 +14,10 @@ V2.1 将 MCU Live Watch Studio 从实时变量示波器进一步扩展为时域�
 - 新增工作站返回配置按钮，安全停止采样、写入和连接后可重新选择后端与工具链。
 - 返回配置或关闭程序不会主动发送 `reset`、`halt`、`program` 或烧录命令。
 - 移除未使用的 SVD 输入和内置 SVD 文件，精简配置界面与发布内容。
+- 一个数据库支持多套项目配置，固定主配置不可删除，并提供新建、删除和清空操作。
+- 配置之间独立保存 ELF、后端、变量、滑动条、波形、布局和采样历史。
+- 新增内置 OpenOCD 的目录版发布包，数据库集中存放在 `data/` 子目录。
+- 单文件版优先读取 EXE 同级已有数据库；SQLite 正常运行只持久保留一个主 DB 文件。
 
 ## 下载和使用
 
@@ -31,6 +35,8 @@ OpenOCD/
 ```
 
 在配置页的 OpenOCD 下拉框中选择该程序；需要查找其他安装时点击“扫描电脑”。
+
+也可以直接下载 `Mcu_Studio_Portable.zip`。它已经包含程序运行库和完整 OpenOCD，解压后运行目录中的 `Mcu_Studio.exe`，不要只复制其中一个 EXE。
 
 ## FFT 使用提示
 
@@ -50,12 +56,14 @@ FFT 适合近似稳态信号。实际采样率应高于待观察最高频率的�
 - 500 组用户流程与组件组合回归通过。
 - FFT 基波、谐波百分比、THD、暂停悬停和窗函数幅值校正测试通过。
 - 工具路径下拉、手动全机扫描、安全返回配置与 J-Link 句柄释放测试通过。
+- 多配置隔离、旧数据库自动迁移、主配置保护和配置清空测试通过。
 - PyQt6 单一 Qt 绑定审计及最终 EXE 启动自检通过。
 - 自动回归不会连接探针或读写 MCU；仍建议发布前完成实际目标板验证。
 
 ## SHA256
 
 ```text
-Mcu_Studio.exe  66B58D3C41D972D1346C4F1186BA996F5F242FC2516AFDFC56CB7A812FD0D7C5
-OpenOCD.zip     41B81FDC499950AAF869617662C0A19845212096946C8D6EC97A3ACB6A59A803
+Mcu_Studio.exe           8ABE8706B7789B4AA42EE3AD1B63C45E6259413DAA3B66F8B60ADF20B4E2B3A8
+OpenOCD.zip              1AC8CEDC1797CE739116FF5DCBE6235D9D1060D43427FD749D808D8BC8C5F870
+Mcu_Studio_Portable.zip  D2391434583A3A1C00160DDEB2AA05608E5B98576C07921DBD0497065E0FF550
 ```

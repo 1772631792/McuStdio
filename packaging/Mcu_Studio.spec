@@ -16,6 +16,7 @@ icon_png = os.environ.get(
     os.path.join(project_root, 'assets', 'mcu_studio_anime.png'),
 )
 app_name = os.environ.get('MCU_STUDIO_APP_NAME', 'Mcu_Studio')
+onedir_build = os.environ.get('MCU_STUDIO_ONEDIR') == '1'
 
 # pyqtgraph can discover several installed Qt bindings. Pin both common
 # selectors before Analysis so PyInstaller's hooks consistently choose PyQt6.
@@ -38,9 +39,8 @@ a = Analysis(
         'PySide6', 'shiboken6',
         'PyQt5', 'PySide2', 'shiboken2',
         'matplotlib', 'scipy',
-        # Plotting is explicitly raster/CPU based. pyqtgraph probes these
-        # optional modules but falls back cleanly when they are absent.
-        'PyQt6.QtOpenGL', 'PyQt6.QtOpenGLWidgets',
+        # Recent pyqtgraph imports QtOpenGL helpers during normal startup even
+        # when plots use the raster path, so those Qt modules must be present.
         'PyQt6.QtPdf', 'PyQt6.QtTest',
         'pyqtgraph.examples', 'pyqtgraph.console', 'pyqtgraph.jupyter',
         'pyqtgraph.opengl',
@@ -57,7 +57,7 @@ a.binaries = [
     if os.path.basename(entry[0]).lower() != 'icuuc.dll'
     and not os.path.basename(entry[0]).lower().startswith('icudt')
     and os.path.basename(entry[0]).lower() not in {
-        'qt6pdf.dll', 'qt6opengl.dll', 'qt6openglwidgets.dll',
+        'qt6pdf.dll',
         'qpdf.dll', 'qgif.dll', 'qicns.dll', 'qtga.dll',
         'qtiff.dll', 'qwbmp.dll', 'qwebp.dll',
     }
@@ -70,12 +70,7 @@ a.datas = [
 ]
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
+exe_options = dict(
     name=app_name,
     debug=False,
     bootloader_ignore_signals=False,
@@ -91,3 +86,30 @@ exe = EXE(
     entitlements_file=None,
     icon=[icon_file],
 )
+
+if onedir_build:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        **exe_options,
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        name=app_name,
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        **exe_options,
+    )

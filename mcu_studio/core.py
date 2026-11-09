@@ -37,6 +37,28 @@ else:
 MAX_ARRAY_ELEMENTS = 4096
 MAX_TYPE_DEPTH = 24
 TCL_TERMINATOR = b"\x1a"
+PORTABLE_MARKER = "portable-mode.flag"
+
+
+def application_data_dir():
+    """Return a writable data directory without cluttering the EXE directory."""
+    override = os.environ.get("MCU_STUDIO_DATA_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+
+    launch_dir = Path(sys.argv[0]).resolve().parent
+    if getattr(sys, "frozen", False):
+        if (launch_dir / PORTABLE_MARKER).is_file():
+            return launch_dir / "data"
+        # A single-file release should keep using an explicitly supplied
+        # database beside the EXE. Only new installs fall back to AppData.
+        if (launch_dir / "live_watch_history.db").is_file():
+            return launch_dir
+        local_app_data = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        if local_app_data:
+            return Path(local_app_data) / "McuStudio"
+        return Path.home() / "AppData" / "Local" / "McuStudio"
+    return launch_dir
 
 
 def receive_tcl_response(sock, chunk_size=4096, max_bytes=1024 * 1024):
@@ -725,55 +747,200 @@ class ProjectConfig:
 
 class LiveWatchDB:
     def __init__(self):
-        base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-        self.path = os.path.join(base_dir, "live_watch_history.db")
+        base_dir = application_data_dir()
+        base_dir.mkdir(parents=True, exist_ok=True)
+        self.path = str(base_dir / "live_watch_history.db")
         self.conn = sqlite3.connect(self.path)
         self.cursor = self.conn.cursor()
-        self.cursor.execute("PRAGMA journal_mode=WAL")
+        # DELETE keeps the persistent state in one visible .db file. SQLite's
+        # rollback journal exists only while a transaction is being committed.
+        self.cursor.execute("PRAGMA journal_mode=DELETE")
         self.cursor.execute("PRAGMA synchronous=NORMAL")
-        try:
-            self.cursor.execute("SELECT offset, base_var FROM variables LIMIT 1")
-        except sqlite3.OperationalError:
-            self.cursor.execute("DROP TABLE IF EXISTS variables")
+        self._initialize_profile_schema()
+        self._vars_cache = None
 
+    def _table_columns(self, table):
+        return {row[1] for row in self.cursor.execute(f'PRAGMA table_info("{table}")')}
+
+    def _initialize_profile_schema(self):
+        """Create profiles and migrate the former single-configuration schema."""
         self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS variables (
-                name TEXT, type TEXT, offset INTEGER, base_var TEXT, tab_idx INTEGER DEFAULT 0,
-                PRIMARY KEY (name, tab_idx)
-            )''')
-        self.cursor.execute('CREATE TABLE IF NOT EXISTS config_cache (key TEXT PRIMARY KEY, value TEXT)')
-        self.cursor.execute('CREATE TABLE IF NOT EXISTS c_code_cache (id INTEGER PRIMARY KEY, code TEXT)')
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS sample_history (
+            CREATE TABLE IF NOT EXISTS profiles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                time_ms REAL NOT NULL,
-                variable TEXT NOT NULL,
-                value REAL NOT NULL
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                is_main INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )''')
         self.cursor.execute(
+            "INSERT OR IGNORE INTO profiles(id, name, is_main) VALUES (1, '主配置', 1)"
+        )
+        self.cursor.execute('CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)')
+
+        table_specs = {
+            "variables": (
+                {"name", "type", "offset", "base_var", "tab_idx"},
+                '''CREATE TABLE variables (
+                    profile_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    type TEXT,
+                    offset INTEGER,
+                    base_var TEXT,
+                    tab_idx INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (profile_id, name, tab_idx)
+                )''',
+                "INSERT INTO variables(profile_id, name, type, offset, base_var, tab_idx) "
+                "SELECT 1, name, type, offset, base_var, tab_idx FROM {legacy}",
+            ),
+            "config_cache": (
+                {"key", "value"},
+                '''CREATE TABLE config_cache (
+                    profile_id INTEGER NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT,
+                    PRIMARY KEY (profile_id, key)
+                )''',
+                "INSERT INTO config_cache(profile_id, key, value) "
+                "SELECT 1, key, value FROM {legacy}",
+            ),
+            "c_code_cache": (
+                {"id", "code"},
+                '''CREATE TABLE c_code_cache (
+                    profile_id INTEGER NOT NULL,
+                    id INTEGER NOT NULL,
+                    code TEXT,
+                    PRIMARY KEY (profile_id, id)
+                )''',
+                "INSERT INTO c_code_cache(profile_id, id, code) "
+                "SELECT 1, id, code FROM {legacy}",
+            ),
+            "sample_history": (
+                {"id", "session_id", "time_ms", "variable", "value"},
+                '''CREATE TABLE sample_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id INTEGER NOT NULL,
+                    session_id TEXT NOT NULL,
+                    time_ms REAL NOT NULL,
+                    variable TEXT NOT NULL,
+                    value REAL NOT NULL
+                )''',
+                "INSERT INTO sample_history(id, profile_id, session_id, time_ms, variable, value) "
+                "SELECT id, 1, session_id, time_ms, variable, value FROM {legacy}",
+            ),
+        }
+        self.cursor.execute("DROP INDEX IF EXISTS idx_sample_history_lookup")
+        for table, (legacy_columns, create_sql, migrate_sql) in table_specs.items():
+            columns = self._table_columns(table)
+            if columns and "profile_id" not in columns:
+                legacy = f"{table}_single_profile_legacy"
+                self.cursor.execute(f'DROP TABLE IF EXISTS "{legacy}"')
+                self.cursor.execute(f'ALTER TABLE "{table}" RENAME TO "{legacy}"')
+                self.cursor.execute(create_sql)
+                if legacy_columns.issubset(columns):
+                    self.cursor.execute(migrate_sql.format(legacy=legacy))
+                self.cursor.execute(f'DROP TABLE "{legacy}"')
+            elif not columns:
+                self.cursor.execute(create_sql)
+
+        self.cursor.execute(
             'CREATE INDEX IF NOT EXISTS idx_sample_history_lookup '
-            'ON sample_history(session_id, variable, time_ms)'
+            'ON sample_history(profile_id, session_id, variable, time_ms)'
+        )
+        row = self.cursor.execute(
+            "SELECT value FROM app_meta WHERE key='active_profile_id'"
+        ).fetchone()
+        try:
+            active_profile_id = int(row[0]) if row else 1
+        except (TypeError, ValueError):
+            active_profile_id = 1
+        if not self.cursor.execute(
+            "SELECT 1 FROM profiles WHERE id=?", (active_profile_id,)
+        ).fetchone():
+            active_profile_id = 1
+        self.active_profile_id = active_profile_id
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO app_meta(key, value) VALUES ('active_profile_id', ?)",
+            (str(active_profile_id),),
         )
         self.conn.commit()
-        self._vars_cache = None
+
+    def list_profiles(self):
+        return self.cursor.execute(
+            "SELECT id, name, is_main FROM profiles ORDER BY is_main DESC, id"
+        ).fetchall()
+
+    def create_profile(self, name):
+        name = str(name or "").strip()
+        if not name:
+            raise ValueError("配置名称不能为空")
+        if len(name) > 40:
+            raise ValueError("配置名称不能超过 40 个字符")
+        try:
+            self.cursor.execute("INSERT INTO profiles(name, is_main) VALUES (?, 0)", (name,))
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"配置名称已存在：{name}") from exc
+        profile_id = int(self.cursor.lastrowid)
+        self.conn.commit()
+        self.set_active_profile(profile_id)
+        return profile_id
+
+    def set_active_profile(self, profile_id):
+        profile_id = int(profile_id)
+        if not self.cursor.execute("SELECT 1 FROM profiles WHERE id=?", (profile_id,)).fetchone():
+            raise ValueError("配置不存在")
+        self.active_profile_id = profile_id
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO app_meta(key, value) VALUES ('active_profile_id', ?)",
+            (str(profile_id),),
+        )
+        self.cursor.execute(
+            "UPDATE profiles SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (profile_id,)
+        )
+        self.conn.commit()
+        self._invalidate_vars_cache()
+
+    def delete_profile(self, profile_id):
+        profile_id = int(profile_id)
+        row = self.cursor.execute(
+            "SELECT is_main FROM profiles WHERE id=?", (profile_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("配置不存在")
+        if int(row[0]):
+            raise ValueError("主配置不能删除")
+        with self.conn:
+            for table in ("variables", "config_cache", "c_code_cache", "sample_history"):
+                self.conn.execute(f'DELETE FROM "{table}" WHERE profile_id=?', (profile_id,))
+            self.conn.execute("DELETE FROM profiles WHERE id=?", (profile_id,))
+        if self.active_profile_id == profile_id:
+            self.set_active_profile(1)
+        self._invalidate_vars_cache()
+
+    def clear_profile(self, profile_id=None):
+        profile_id = int(profile_id or self.active_profile_id)
+        if not self.cursor.execute("SELECT 1 FROM profiles WHERE id=?", (profile_id,)).fetchone():
+            raise ValueError("配置不存在")
+        with self.conn:
+            for table in ("variables", "config_cache", "c_code_cache", "sample_history"):
+                self.conn.execute(f'DELETE FROM "{table}" WHERE profile_id=?', (profile_id,))
+        self._invalidate_vars_cache()
 
     def _invalidate_vars_cache(self):
         self._vars_cache = None
 
     def save_var(self, name, var_type, offset=0, base_var="", tab_idx=0):
-        self.cursor.execute("INSERT OR REPLACE INTO variables (name, type, offset, base_var, tab_idx) VALUES (?, ?, ?, ?, ?)", (name, var_type, offset, base_var, tab_idx))
+        self.cursor.execute("INSERT OR REPLACE INTO variables (profile_id, name, type, offset, base_var, tab_idx) VALUES (?, ?, ?, ?, ?, ?)", (self.active_profile_id, name, var_type, offset, base_var, tab_idx))
         self.conn.commit()
         self._invalidate_vars_cache()
 
     def delete_var(self, name, tab_idx=0):
-        self.cursor.execute("DELETE FROM variables WHERE name=? AND tab_idx=?", (name, tab_idx))
+        self.cursor.execute("DELETE FROM variables WHERE profile_id=? AND name=? AND tab_idx=?", (self.active_profile_id, name, tab_idx))
         self.conn.commit()
         self._invalidate_vars_cache()
 
     def get_all_vars(self):
         if self._vars_cache is None:
-            self.cursor.execute("SELECT name, type, offset, base_var, tab_idx FROM variables")
+            self.cursor.execute("SELECT name, type, offset, base_var, tab_idx FROM variables WHERE profile_id=?", (self.active_profile_id,))
             self._vars_cache = self.cursor.fetchall()
         return list(self._vars_cache)
 
@@ -793,41 +960,41 @@ class LiveWatchDB:
     def replace_root_vars(self, root, tab_idx, records):
         """Replace one expanded root in a single transaction."""
         self.cursor.execute(
-            "DELETE FROM variables WHERE tab_idx=? AND "
+            "DELETE FROM variables WHERE profile_id=? AND tab_idx=? AND "
             "(name=? OR substr(name, 1, length(?) + 1)=? || '.' "
             "OR substr(name, 1, length(?) + 1)=? || '[')",
-            (tab_idx, root, root, root, root, root),
+            (self.active_profile_id, tab_idx, root, root, root, root, root),
         )
         self.cursor.executemany(
-            "INSERT OR REPLACE INTO variables (name, type, offset, base_var, tab_idx) VALUES (?, ?, ?, ?, ?)",
-            ((record["path"], record["type"], record["offset"], root, tab_idx) for record in records),
+            "INSERT OR REPLACE INTO variables (profile_id, name, type, offset, base_var, tab_idx) VALUES (?, ?, ?, ?, ?, ?)",
+            ((self.active_profile_id, record["path"], record["type"], record["offset"], root, tab_idx) for record in records),
         )
         self.conn.commit()
         self._invalidate_vars_cache()
 
     def save_config(self, key, value):
-        self.cursor.execute("INSERT OR REPLACE INTO config_cache (key, value) VALUES (?, ?)", (key, value))
+        self.cursor.execute("INSERT OR REPLACE INTO config_cache (profile_id, key, value) VALUES (?, ?, ?)", (self.active_profile_id, key, value))
         self.conn.commit()
 
     def get_config(self, key, default=""):
-        self.cursor.execute("SELECT value FROM config_cache WHERE key=?", (key,))
+        self.cursor.execute("SELECT value FROM config_cache WHERE profile_id=? AND key=?", (self.active_profile_id, key))
         row = self.cursor.fetchone()
         return row[0] if row else default
 
     def save_c_code(self, code):
-        self.cursor.execute("INSERT OR REPLACE INTO c_code_cache (id, code) VALUES (1, ?)", (code,))
+        self.cursor.execute("INSERT OR REPLACE INTO c_code_cache (profile_id, id, code) VALUES (?, 1, ?)", (self.active_profile_id, code))
         self.conn.commit()
 
     def get_c_code(self):
-        self.cursor.execute("SELECT code FROM c_code_cache WHERE id=1")
+        self.cursor.execute("SELECT code FROM c_code_cache WHERE profile_id=? AND id=1", (self.active_profile_id,))
         row = self.cursor.fetchone()
         return row[0] if row else ""
 
     def get_sample_history(self, variable, session_id=None):
         if session_id is None:
             self.cursor.execute(
-                "SELECT session_id FROM sample_history WHERE variable=? ORDER BY id DESC LIMIT 1",
-                (variable,),
+                "SELECT session_id FROM sample_history WHERE profile_id=? AND variable=? ORDER BY id DESC LIMIT 1",
+                (self.active_profile_id, variable),
             )
             row = self.cursor.fetchone()
             if row is None:
@@ -835,7 +1002,7 @@ class LiveWatchDB:
             session_id = row[0]
         self.cursor.execute(
             "SELECT time_ms, value FROM sample_history "
-            "WHERE session_id=? AND variable=? ORDER BY time_ms, id",
-            (session_id, variable),
+            "WHERE profile_id=? AND session_id=? AND variable=? ORDER BY time_ms, id",
+            (self.active_profile_id, session_id, variable),
         )
         return self.cursor.fetchall()

@@ -116,12 +116,32 @@ def inspect_archive(executable: Path, env: dict[str, str]) -> None:
         raise RuntimeError("PyQt6 was not found in the packaged executable")
 
 
+def inspect_onedir(release_dir: Path) -> None:
+    """Audit Qt bindings in a PyInstaller one-directory distribution."""
+    relative_files = [
+        path.relative_to(release_dir).as_posix().casefold()
+        for path in release_dir.rglob("*")
+        if path.is_file()
+    ]
+    unwanted = [
+        name for name in OTHER_QT_BINDINGS
+        if any(name.casefold() in relative_path for relative_path in relative_files)
+    ]
+    if unwanted:
+        raise RuntimeError(
+            "The portable directory contains another Qt binding: " + ", ".join(unwanted)
+        )
+    if not any("/pyqt6/" in f"/{relative_path}" for relative_path in relative_files):
+        raise RuntimeError("PyQt6 was not found in the portable directory")
+
+
 def run_packaged_self_test(executable: Path, env: dict[str, str]) -> None:
     """Make missing frozen imports fail by exit code instead of an error dialog."""
     with tempfile.TemporaryDirectory(prefix="mcu_studio_self_test_") as directory:
         report_path = Path(directory) / "report.json"
         test_env = env.copy()
         test_env["QT_QPA_PLATFORM"] = "offscreen"
+        test_env["MCU_STUDIO_DATA_DIR"] = directory
         result = subprocess.run(
             [str(executable), "--self-test", str(report_path)],
             cwd=PROJECT_ROOT,

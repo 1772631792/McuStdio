@@ -63,6 +63,11 @@ def validate_imports_and_elf_helpers() -> None:
 
     check(ui.MCUStudioWindow.__name__ == "MCUStudioWindow", "UI module imports")
     check(
+        "*.elf" in ui.FIRMWARE_FILE_FILTER
+        and "*.axf" in ui.FIRMWARE_FILE_FILTER,
+        "firmware picker accepts ELF and AXF files",
+    )
+    check(
         ui.QMessageBox is ui.SilentMessageBox,
         "application dialogs use the silent message box implementation",
     )
@@ -152,6 +157,26 @@ def validate_imports_and_elf_helpers() -> None:
     check(
         fake_link.calls == [(0x20000000, 8)],
         "J-Link worker executes one DLL read for adjacent waveform variables",
+    )
+
+    class BusyJLink:
+        def memory_read32(self, _address, _count):
+            raise RuntimeError("J-Link is already in use by another application")
+
+    busy_worker = workers.HighSpeedSamplingWorker(
+        batch_config,
+        {0: ("0x20000000", "uint32_t", "busy")},
+        0,
+        BusyJLink(),
+    )
+    link_losses = []
+    busy_worker.link_lost.connect(link_losses.append)
+    busy_worker.run()
+    check(
+        len(link_losses) == 1
+        and "another application" in link_losses[0]
+        and not busy_worker.is_link_alive,
+        "sampling stops and reports once when another program takes the debugger",
     )
     database = core.ElfDatabase()
     database.symbols = {"value": 0x20000000}
@@ -383,6 +408,38 @@ def validate_imports_and_elf_helpers() -> None:
             "a newly compiled ELF stays pending until flash while the old symbol map remains active",
         )
         studio._set_elf_update_pending(False)
+
+        studio.backend_suspended = False
+        with patch.object(studio, "disconnect_backend", side_effect=lambda: setattr(studio, "backend_suspended", True)) as disconnect:
+            studio._handle_backend_connection_lost("probe busy")
+            studio._handle_backend_connection_lost("duplicate")
+        check(
+            disconnect.call_count == 1
+            and studio.backend_disconnect_reason == "probe busy"
+            and "手动重连" in studio.lbl_status_text.text(),
+            "backend contention automatically suspends once and waits for manual reconnect",
+        )
+
+        studio.backend_suspended = True
+        studio.config.backend_mode = "JLINK"
+        fake_backend = object()
+        with patch.object(studio, "reload_elf_symbols", return_value=(True, "latest firmware loaded")) as reload_latest, patch.object(
+            studio, "_finish_backend_reconnect"
+        ) as finish_reconnect:
+            studio._backend_reconnect_finished(True, "", fake_backend)
+        check(
+            reload_latest.call_args.kwargs == {
+                "show_message": False,
+                "source": "reconnect",
+                "restart_sampling": False,
+            }
+            and finish_reconnect.call_args.args == (True, "latest firmware loaded"),
+            "manual reconnect reloads the latest ELF or AXF once before sampling resumes",
+        )
+        studio.jlink_native_instance = None
+        studio.variable_write_worker.update_jlink(None)
+        studio.backend_suspended = False
+        studio.backend_disconnect_reason = ""
 
         check(studio.tab_widget.count() == 3, "three fixed debug windows are created")
         check(studio.debug_trees[0].headerItem().text(0) == "全局变量", "debug variable column uses the compact title")
@@ -1028,7 +1085,7 @@ def validate_openocd_flash_worker() -> None:
     emitted = []
 
     with tempfile.TemporaryDirectory() as directory:
-        firmware = Path(directory) / "firmware build.elf"
+        firmware = Path(directory) / "firmware build.axf"
         firmware.touch()
         worker = workers.OpenOcdFlashWorker(config, str(firmware))
         worker.finished_signal.connect(
@@ -1056,7 +1113,7 @@ def validate_openocd_flash_worker() -> None:
         and flash_command.startswith('program "')
         and flash_command.endswith('" verify reset exit')
         and "\\" not in flash_command,
-        "OpenOCD flash worker programs, verifies and resets the selected ELF",
+        "OpenOCD flash worker programs, verifies and resets the selected AXF",
     )
 
 
@@ -1072,7 +1129,7 @@ def validate_jlink_bitness_and_flash_command() -> None:
         check(Path(core.jlink_dll_path(root)) == expected_dll, "J-Link DLL bitness is deterministic")
 
         commander = root / "JLink.exe"
-        firmware = root / "firmware.elf"
+        firmware = root / "firmware.axf"
         commander.touch()
         firmware.touch()
         captured = {}
@@ -1094,7 +1151,7 @@ def validate_jlink_bitness_and_flash_command() -> None:
         command = captured["command"]
         check(command[command.index("-device") + 1] == "PY32F002Ax5", "original J-Link device name is preserved")
         check(captured["cwd"] == str(root), "J-Link Commander uses its own installation directory")
-        check(str(firmware) in captured["script"], "J-Link script contains the selected ELF")
+        check(str(firmware) in captured["script"], "J-Link script contains the selected AXF")
 
 
 def validate_large_watch_database() -> None:

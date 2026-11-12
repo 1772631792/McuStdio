@@ -123,11 +123,11 @@ class ElfFlashWorker(QThread):
             if not os.path.isfile(self.commander):
                 raise FileNotFoundError(f"找不到 J-Link Commander：{self.commander}")
             if not os.path.isfile(self.elf_path):
-                raise FileNotFoundError(f"找不到 ELF：{self.elf_path}")
+                raise FileNotFoundError(f"找不到 ELF / AXF：{self.elf_path}")
             if not self.flash_device.strip() or not self.connect_device.strip():
                 raise ValueError("J-Link 烧录设备名和连接设备名不能为空")
             if any(character in self.elf_path for character in ('"', "\r", "\n")):
-                raise ValueError("ELF 路径不能包含双引号或换行符")
+                raise ValueError("ELF / AXF 路径不能包含双引号或换行符")
             with tempfile.NamedTemporaryFile(
                 "w", suffix=".jlink", encoding="utf-8", newline="\n", delete=False
             ) as script:
@@ -175,7 +175,7 @@ class ElfFlashWorker(QThread):
                 message = output[-4000:] or f"JLink.exe 退出码：{result.returncode}"
             else:
                 success = True
-                message = f"ELF 已烧录并复位运行：\n{self.elf_path}"
+                message = f"ELF / AXF 已烧录并复位运行：\n{self.elf_path}"
         except subprocess.TimeoutExpired:
             message = "J-Link 烧录超过 180 秒，已停止等待。"
         except Exception as exc:
@@ -209,9 +209,9 @@ class OpenOcdFlashWorker(QThread):
         try:
             details = validate_openocd_config(self.config)
             if not os.path.isfile(self.elf_path):
-                raise FileNotFoundError(f"找不到 ELF：{self.elf_path}")
+                raise FileNotFoundError(f"找不到 ELF / AXF：{self.elf_path}")
             if any(character in self.elf_path for character in ('"', "\r", "\n")):
-                raise ValueError("ELF 路径不能包含双引号或换行符")
+                raise ValueError("ELF / AXF 路径不能包含双引号或换行符")
 
             stopped = True
             stop_managed_openocd(self.config)
@@ -244,7 +244,7 @@ class OpenOcdFlashWorker(QThread):
                 message = output[-4000:] or f"OpenOCD 退出码：{result.returncode}"
             else:
                 success = True
-                message = f"ELF 已通过 OpenOCD 烧录、校验并复位运行：\n{self.elf_path}"
+                message = f"ELF / AXF 已通过 OpenOCD 烧录、校验并复位运行：\n{self.elf_path}"
         except subprocess.TimeoutExpired:
             message = "OpenOCD 烧录超过 180 秒，已停止等待。"
         except Exception as exc:
@@ -549,6 +549,7 @@ class SampleHistoryWriter(QThread):
 
 class HighSpeedSamplingWorker(QThread):
     data_received = pyqtSignal(list)
+    link_lost = pyqtSignal(str)
 
     def __init__(self, config, active_channels, sample_delay, jlink_instance=None, elf_db=None, jlink_lock=None):
         super().__init__()
@@ -561,6 +562,14 @@ class HighSpeedSamplingWorker(QThread):
         self.running = True
         self.is_link_alive = False  
         self.active_socket = None
+        self._link_loss_reported = False
+
+    def _report_link_lost(self, error):
+        if self._link_loss_reported or not self.running:
+            return
+        self._link_loss_reported = True
+        message = str(error or "调试后端通信中断")
+        self.link_lost.emit(message)
 
     def run(self):
         s = None
@@ -619,8 +628,10 @@ class HighSpeedSamplingWorker(QThread):
                 s = connect_openocd()
                 self.active_socket = s
                 self.is_link_alive = True
-            except Exception:
+            except Exception as exc:
                 self.is_link_alive = False
+                self._report_link_lost(exc)
+                return
 
         local_batch = []
         last_flush_time = time.time()
@@ -629,18 +640,12 @@ class HighSpeedSamplingWorker(QThread):
             t_now = time.time()
             packet = {}
             if self.config.backend_mode == "OPENOCD":
-                if not merged_cmd_bytes or not self.is_link_alive:
-                    if not merged_cmd_bytes:
-                        time.sleep(0.04); continue
-                    try:
-                        if s: s.close()
-                        s = connect_openocd()
-                        self.active_socket = s
-                        self.is_link_alive = True
-                    except Exception:
-                        self.is_link_alive = False
-                        time.sleep(0.25)
-                        continue
+                if not merged_cmd_bytes:
+                    time.sleep(0.04)
+                    continue
+                if not self.is_link_alive:
+                    self._report_link_lost("OpenOCD 调试连接已断开")
+                    break
                 try:
                     s.sendall(merged_cmd_bytes)
                     res = receive_tcl_response(s)
@@ -650,15 +655,15 @@ class HighSpeedSamplingWorker(QThread):
                         block_start if use_block_read else None,
                         word_count if use_block_read else None,
                     )
-                except Exception:
+                except Exception as exc:
                     self.is_link_alive = False
                     if s:
                         try: s.close()
                         except Exception: pass
                     s = None
                     self.active_socket = None
-                    time.sleep(0.05)
-                    continue
+                    self._report_link_lost(exc)
+                    break
             else:
                 if self.jlink:
                     try:
@@ -680,12 +685,14 @@ class HighSpeedSamplingWorker(QThread):
                                 else: raw = int.from_bytes(bytes(self.jlink.memory_read8(c['addr'], c['width'])), "little")
                                 packet[c['ch_idx']] = decode_sample_value(raw, c)
                         self.is_link_alive = True
-                    except Exception:
+                    except Exception as exc:
                         self.is_link_alive = False
-                        time.sleep(0.04); continue
+                        self._report_link_lost(exc)
+                        break
                 else:
                     self.is_link_alive = False
-                    time.sleep(0.04); continue
+                    self._report_link_lost("J-Link 调试连接已断开")
+                    break
 
             if packet: local_batch.append((t_now, packet))
             # Keep Qt event traffic bounded at high sample rates.  A signal

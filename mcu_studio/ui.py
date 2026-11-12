@@ -58,6 +58,8 @@ from .spectrum import (DEFAULT_FFT_SETTINGS, WINDOW_LABELS, analyze_spectrum,
 
 pg.setConfigOptions(useOpenGL=False, antialias=True)
 
+FIRMWARE_FILE_FILTER = "ELF / AXF 固件 (*.elf *.axf);;所有文件 (*)"
+
 try:
     import pylink
 except ImportError:
@@ -607,8 +609,8 @@ class ElfVariableDialog(QDialog):
         self.elf_status = QLabel()
         self.elf_status.setObjectName("appSubtitle")
         buttons.addWidget(self.elf_status, 1)
-        reload_button = QPushButton("重新提取 ELF")
-        reload_button.setToolTip("重新读取当前 ELF 的符号表和 DWARF，并刷新已有监视变量的地址与结构")
+        reload_button = QPushButton("重新提取 ELF/AXF")
+        reload_button.setToolTip("重新读取当前 ELF/AXF 的符号表和 DWARF，并刷新已有监视变量的地址与结构")
         reload_button.clicked.connect(lambda: self.reload_requested_signal.emit())
         buttons.addWidget(reload_button)
         add = QPushButton("添加到当前调试窗口")
@@ -1070,9 +1072,11 @@ class LoginConfigDialog(QDialog):
         self.elf_edit = QLineEdit()
         btn_elf = QPushButton("浏览…")
         btn_elf.setFixedWidth(76)
-        btn_elf.clicked.connect(lambda: self.select_file(self.elf_edit, "选择 ELF 固件", "ELF Files (*.elf)"))
+        btn_elf.clicked.connect(
+            lambda: self.select_file(self.elf_edit, "选择 ELF / AXF 固件", FIRMWARE_FILE_FILTER)
+        )
         h1 = QHBoxLayout(); h1.setSpacing(6); h1.addWidget(self.elf_edit, 1); h1.addWidget(btn_elf)
-        form.addRow("ELF 固件", h1)
+        form.addRow("ELF / AXF 固件", h1)
 
         backend_section = QLabel("调试后端")
         backend_section.setObjectName("sectionTitle")
@@ -1619,7 +1623,7 @@ class LoginConfigDialog(QDialog):
         self.config.theme_mode = "LIGHT" if self.theme_combo.currentIndex() == 1 else "DARK"
 
         if not os.path.isfile(self.config.elf_path):
-            QMessageBox.warning(self, "配置无效", f"找不到 ELF 文件：\n{self.config.elf_path or '(未设置)'}")
+            QMessageBox.warning(self, "配置无效", f"找不到 ELF / AXF 文件：\n{self.config.elf_path or '(未设置)'}")
             return
 
         if self.config.backend_mode == "OPENOCD":
@@ -2414,6 +2418,7 @@ class MCUStudioWindow(QMainWindow):
         self.backend_close_workers = []
         self.reconnect_worker = None
         self.backend_suspended = False
+        self.backend_disconnect_reason = ""
         self.flash_sequence_active = False
         self.elf_reload_in_progress = False
         self.elf_update_pending = False
@@ -2582,7 +2587,7 @@ class MCUStudioWindow(QMainWindow):
         if self.elf_reload_in_progress or self.initial_workspace_loaded:
             return
         self.elf_reload_in_progress = True
-        self.lbl_status_text.setText("正在后台解析 ELF…")
+        self.lbl_status_text.setText("正在后台解析 ELF/AXF…")
         self.btn_elf_browser.setEnabled(False)
         result = {"ok": False, "database": None, "error": ""}
         worker = ElfParseWorker(elf_path, self)
@@ -2600,11 +2605,11 @@ class MCUStudioWindow(QMainWindow):
                 self.elf_db = result["database"]
                 self.symbol_cache = dict(self.elf_db.symbols)
                 print(f"ELF loaded: {len(self.symbol_cache)} symbols, {len(self.elf_db.types)} DWARF variables")
-                self.lbl_status_text.setText("ELF 已加载")
+                self.lbl_status_text.setText("ELF/AXF 已加载")
                 self._finish_initial_workspace_load(synchronize_elf=True)
             else:
                 print(f"❌ ELF 符号表加载异常: {result['error']}")
-                self.lbl_status_text.setText("ELF 解析失败，已保留数据库配置")
+                self.lbl_status_text.setText("ELF/AXF 解析失败，已保留数据库配置")
                 self._finish_initial_workspace_load(synchronize_elf=False)
 
         worker.result_ready.connect(receive_result)
@@ -2625,7 +2630,7 @@ class MCUStudioWindow(QMainWindow):
 
     def _parse_elf_in_background(self, elf_path):
         """Parse ELF on a worker while a local event loop keeps the UI responsive."""
-        result = {"ok": False, "database": None, "error": "ELF 解析线程未返回结果"}
+        result = {"ok": False, "database": None, "error": "ELF/AXF 解析线程未返回结果"}
         loop = QEventLoop(self)
         worker = ElfParseWorker(elf_path, self)
         self.elf_parse_worker = worker
@@ -2642,24 +2647,24 @@ class MCUStudioWindow(QMainWindow):
         self.elf_parse_worker = None
         return result["ok"], result["database"], result["error"]
 
-    def reload_elf_symbols(self, show_message=True, source="manual"):
+    def reload_elf_symbols(self, show_message=True, source="manual", restart_sampling=True):
         """Atomically reload ELF/DWARF and refresh saved trees and channel addresses."""
         if self.elf_reload_in_progress:
-            return False, "ELF 正在后台解析，请稍候"
+            return False, "ELF/AXF 正在后台解析，请稍候"
         elf_path = os.path.abspath(self.config.elf_path) if self.config.elf_path else ""
         if not os.path.isfile(elf_path):
-            error = f"找不到 ELF：\n{elf_path or '(未设置)'}"
-            if show_message: QMessageBox.warning(self, "重新提取 ELF 失败", error)
+            error = f"找不到 ELF/AXF：\n{elf_path or '(未设置)'}"
+            if show_message: QMessageBox.warning(self, "重新提取 ELF/AXF 失败", error)
             return False, error
 
         self.elf_reload_in_progress = True
-        self.lbl_status_text.setText("正在后台解析 ELF…")
+        self.lbl_status_text.setText("正在后台解析 ELF/AXF…")
         ok, refreshed, parse_error = self._parse_elf_in_background(elf_path)
         if not ok or refreshed is None:
             self.elf_reload_in_progress = False
-            error = f"ELF 解析失败，已保留原来的变量数据：\n{parse_error}"
-            self.lbl_status_text.setText("ELF 解析失败，已保留原有变量")
-            if show_message: QMessageBox.critical(self, "重新提取 ELF 失败", error)
+            error = f"ELF/AXF 解析失败，已保留原来的变量数据：\n{parse_error}"
+            self.lbl_status_text.setText("ELF/AXF 解析失败，已保留原有变量")
+            if show_message: QMessageBox.critical(self, "重新提取 ELF/AXF 失败", error)
             return False, error
 
         self.stop_sampling_thread()
@@ -2670,7 +2675,7 @@ class MCUStudioWindow(QMainWindow):
 
             for tree in self.debug_trees.values():
                 tree.clear()
-            self.load_history_from_db(remove_missing=source in ("flash", "manual"))
+            self.load_history_from_db(remove_missing=source in ("flash", "manual", "reconnect"))
             unavailable_count = self._rebuild_sampling_channels_from_bindings()
 
             if hasattr(self, 'adv_parse_dialog') and self.adv_parse_dialog:
@@ -2686,12 +2691,13 @@ class MCUStudioWindow(QMainWindow):
         finally:
             self.elf_reload_in_progress = False
 
-        self.restart_sampling_thread()
-        summary = f"已重新提取 ELF：{len(refreshed.symbols)} 个符号，{len(refreshed.types)} 个 DWARF 变量。"
+        if restart_sampling:
+            self.restart_sampling_thread()
+        summary = f"已重新提取 ELF/AXF：{len(refreshed.symbols)} 个符号，{len(refreshed.types)} 个 DWARF 变量。"
         if unavailable_count:
             summary += f" {unavailable_count} 个已监视变量暂时不可用，配置已保留。"
-        self.lbl_status_text.setText("ELF 已自动重新提取" if source == "flash" else "ELF 已重新提取")
-        if show_message: QMessageBox.information(self, "重新提取 ELF 完成", summary)
+        self.lbl_status_text.setText("ELF/AXF 已自动重新提取" if source == "flash" else "ELF/AXF 已重新提取")
+        if show_message: QMessageBox.information(self, "重新提取 ELF/AXF 完成", summary)
         return True, summary
 
     def _elf_file_signature(self):
@@ -2716,7 +2722,7 @@ class MCUStudioWindow(QMainWindow):
         if signature != self.elf_pending_signature:
             self.elf_pending_signature = signature
             self.elf_pending_stable_ticks = 1
-            self.lbl_status_text.setText("检测到 ELF 更新，等待文件写入完成…")
+            self.lbl_status_text.setText("检测到 ELF/AXF 更新，等待文件写入完成…")
             return
         self.elf_pending_stable_ticks += 1
         if self.elf_pending_stable_ticks < 2:
@@ -2728,7 +2734,7 @@ class MCUStudioWindow(QMainWindow):
         self.elf_pending_signature = None
         self.elf_pending_stable_ticks = 0
         self._set_elf_update_pending(True)
-        self.lbl_status_text.setText("检测到新 ELF；继续使用旧映射，烧录成功后自动同步")
+        self.lbl_status_text.setText("检测到新 ELF/AXF；继续使用旧映射，烧录成功后自动同步")
 
     def _set_elf_update_pending(self, pending):
         self.elf_update_pending = bool(pending)
@@ -2736,9 +2742,9 @@ class MCUStudioWindow(QMainWindow):
             return
         self.btn_flash.setText("烧录*" if self.elf_update_pending else "烧录")
         self.btn_flash.setToolTip(
-            "检测到新 ELF；当前继续按旧 ELF 调试，烧录成功后自动切换并同步变量"
+            "检测到新 ELF/AXF；当前继续按旧映射调试，烧录成功后自动切换并同步变量"
             if self.elf_update_pending else
-            "通过当前调试后端烧录 ELF；只有点击并确认后才会擦写 Flash/复位"
+            "通过当前调试后端烧录 ELF/AXF；只有点击并确认后才会擦写 Flash/复位"
         )
 
     def type_info_for_path(self, path):
@@ -2842,6 +2848,10 @@ class MCUStudioWindow(QMainWindow):
                 try: self.tcl_socket.close()
                 except OSError: pass
             self.tcl_socket = None
+            QTimer.singleShot(
+                0,
+                lambda: self._handle_backend_connection_lost("OpenOCD TCL 通信中断"),
+            )
             return "ERROR"
 
     def get_current_tree(self):
@@ -2936,7 +2946,7 @@ class MCUStudioWindow(QMainWindow):
 
         self.btn_reconnect = QPushButton("重连")
         self.btn_reconnect.setProperty("commandButton", True)
-        self.btn_reconnect.setToolTip("重新启动并连接当前配置的通信后端，不复位 MCU")
+        self.btn_reconnect.setToolTip("手动重新连接当前通信后端；成功后读取一次最新 ELF/AXF，不主动复位 MCU")
         self.btn_reconnect.clicked.connect(self.force_reconnect_engine)
         
         self.btn_mcu_reset = QPushButton("复位")
@@ -2946,7 +2956,7 @@ class MCUStudioWindow(QMainWindow):
 
         self.btn_flash = QPushButton("烧录")
         self.btn_flash.setProperty("commandButton", True)
-        self.btn_flash.setToolTip("通过当前调试后端烧录 ELF；只有点击并确认后才会擦写 Flash/复位")
+        self.btn_flash.setToolTip("通过当前调试后端烧录 ELF/AXF；只有点击并确认后才会擦写 Flash/复位")
         self.btn_flash.clicked.connect(self.flash_elf_by_user)
         self.btn_flash.setEnabled(True)
         self.btn_disconnect.setProperty("commandButton", True)
@@ -3922,7 +3932,7 @@ class MCUStudioWindow(QMainWindow):
         device = self.config.jlink_device
         _loader_config, loader_error = self.find_flash_loader_config(jlink_dir, device)
         if not os.path.isfile(elf_path):
-            QMessageBox.warning(self, "无法烧录", f"找不到 ELF：\n{elf_path}")
+            QMessageBox.warning(self, "无法烧录", f"找不到 ELF/AXF：\n{elf_path}")
             return
         if not os.path.isfile(commander):
             QMessageBox.warning(self, "无法烧录", f"找不到与 J-Flash 同目录的 JLink.exe：\n{commander}")
@@ -3932,7 +3942,7 @@ class MCUStudioWindow(QMainWindow):
             return
         self.btn_flash.setEnabled(False)
         self.btn_flash.setText("正在烧录…")
-        self.lbl_status_text.setText("正在烧录 ELF（界面仍可响应）")
+        self.lbl_status_text.setText("正在烧录 ELF/AXF（界面仍可响应）")
         self._set_flash_progress("running", details=elf_path)
         self.flash_sequence_active = True
         self.backend_suspended = True
@@ -3951,7 +3961,7 @@ class MCUStudioWindow(QMainWindow):
 
     def _flash_elf_with_openocd(self, elf_path):
         if not os.path.isfile(elf_path):
-            QMessageBox.warning(self, "无法烧录", f"找不到 ELF：\n{elf_path}")
+            QMessageBox.warning(self, "无法烧录", f"找不到 ELF/AXF：\n{elf_path}")
             return
         try:
             validate_openocd_config(self.config)
@@ -3961,7 +3971,7 @@ class MCUStudioWindow(QMainWindow):
 
         self.btn_flash.setEnabled(False)
         self.btn_flash.setText("正在烧录…")
-        self.lbl_status_text.setText("正在通过 OpenOCD 烧录 ELF（界面仍可响应）")
+        self.lbl_status_text.setText("正在通过 OpenOCD 烧录 ELF/AXF（界面仍可响应）")
         self._set_flash_progress("running", details=elf_path)
         self.flash_sequence_active = True
         self.backend_suspended = True
@@ -4104,6 +4114,7 @@ class MCUStudioWindow(QMainWindow):
             return
         self._execute_flash_animation(self.btn_reconnect, "#00b0ff", "")
         self.backend_suspended = True
+        self.backend_disconnect_reason = ""
         self.variable_write_worker.cancel_pending()
         self.stop_sampling_thread()
         self.btn_disconnect.setEnabled(False)
@@ -4146,11 +4157,21 @@ class MCUStudioWindow(QMainWindow):
                 self.jlink_native_instance = backend
                 self.variable_write_worker.update_jlink(backend)
             self.backend_suspended = False
+            self.backend_disconnect_reason = ""
         else:
             self.backend_suspended = True
+            self.backend_disconnect_reason = str(error or "通信后端重连失败")
         self.btn_flash.setEnabled(True)
         self.btn_mcu_reset.setEnabled(True)
-        self._finish_backend_reconnect()
+        reload_ok = None
+        reload_message = ""
+        if success:
+            reload_ok, reload_message = self.reload_elf_symbols(
+                show_message=False,
+                source="reconnect",
+                restart_sampling=False,
+            )
+        self._finish_backend_reconnect(reload_ok, reload_message)
         if not success:
             QMessageBox.critical(self, f"{self.config.backend_mode} 重连失败", error)
 
@@ -4159,6 +4180,7 @@ class MCUStudioWindow(QMainWindow):
             QMessageBox.information(self, "正在烧录", "烧录过程中不能断开通信后端。")
             return
         self.backend_suspended = True
+        self.backend_disconnect_reason = ""
         self.variable_write_worker.cancel_pending()
         self.stop_sampling_thread()
         if self.tcl_socket:
@@ -4180,6 +4202,19 @@ class MCUStudioWindow(QMainWindow):
         self.btn_reconnect.setEnabled(True)
         self.lbl_status_text.setText("通信后端已断开（未复位 MCU）")
         self.lbl_status_text.setStyleSheet("color: #f0a020; font-family: 'Microsoft YaHei'; font-size: 13px; font-weight: bold;")
+
+    def _handle_backend_connection_lost(self, reason):
+        if self.backend_suspended or self.flash_sequence_active:
+            return
+        reason = str(reason or "调试后端通信中断")
+        self.disconnect_backend()
+        self.backend_disconnect_reason = reason
+        self.lbl_status_text.setText("检测到调试后端被占用或连接丢失，已自动断开；请手动重连")
+        self.lbl_status_text.setToolTip(reason)
+
+    def _sampling_link_lost(self, reason):
+        if self.sender() is self.worker:
+            self._handle_backend_connection_lost(reason)
 
     def return_to_configuration(self):
         if self.flash_sequence_active:
@@ -4213,12 +4248,18 @@ class MCUStudioWindow(QMainWindow):
         elif error:
             self.lbl_status_text.setText(f"后端已停止读写；驱动释放异常：{error}")
 
-    def _finish_backend_reconnect(self):
+    def _finish_backend_reconnect(self, reload_ok=None, reload_message=""):
         connected = (self.openocd_link_alive if self.config.backend_mode == "OPENOCD"
                      else bool(self.jlink_native_instance))
         self.btn_disconnect.setEnabled(connected)
         self.btn_reconnect.setEnabled(True)
-        self.lbl_status_text.setText("通信后端重连完成" if connected else "通信后端重连失败")
+        if connected and reload_ok is True:
+            self.lbl_status_text.setText("通信后端重连完成，已读取最新 ELF/AXF")
+        elif connected and reload_ok is False:
+            self.lbl_status_text.setText("通信后端重连完成；ELF/AXF 读取失败，保留原变量映射")
+        else:
+            self.lbl_status_text.setText("通信后端重连完成" if connected else "通信后端重连失败")
+        self.lbl_status_text.setToolTip(str(reload_message or ""))
         self.restart_sampling_thread()
 
     def _execute_flash_animation(self, button, target_color, base_style=""):
@@ -5433,6 +5474,7 @@ class MCUStudioWindow(QMainWindow):
         elif hasattr(self, "lbl_status_text"):
             self.lbl_status_text.setText(f"变量写入失败：{path}")
             self.lbl_status_text.setToolTip(error)
+            self._handle_backend_connection_lost(error)
         self.variable_write_result.emit(path, sequence, success, error, value)
 
     def add_elf_variable(self, root, target_slot=-1):
@@ -5584,6 +5626,7 @@ class MCUStudioWindow(QMainWindow):
                 lambda batch, source=worker: self.handle_high_speed_data(batch)
                 if source is self.worker else None
             )
+            worker.link_lost.connect(self._sampling_link_lost)
             worker.start()
 
     def stop_sampling_thread(self, wait_ms=250):
@@ -5777,6 +5820,8 @@ class MCUStudioWindow(QMainWindow):
                     item.setText(2, self._format_low_speed_value(data, type_info, v_type))
             except (RuntimeError, ValueError, struct.error, OverflowError):
                 continue
+        if error:
+            self._handle_backend_connection_lost(error)
 
     def inject_var_to_tree_ui(self, path, v_type, tab_idx):
         tree = self.debug_trees.get(tab_idx)
@@ -5823,6 +5868,7 @@ class MCUStudioWindow(QMainWindow):
 
     def update_hardware_heartbeat(self):
         is_alive = False
+        lost_reason = ""
         if self.backend_suspended:
             is_alive = False
         elif self.config.backend_mode == "OPENOCD":
@@ -5833,12 +5879,18 @@ class MCUStudioWindow(QMainWindow):
             is_alive = process_alive and self.openocd_link_alive and (not has_worker or worker_alive)
             if not process_alive:
                 self.openocd_link_alive = False
+                lost_reason = "OpenOCD 进程已退出，可能由其他下载或调试程序占用了探针"
         else:
             # Do not call into the native DLL from the GUI heartbeat.  Some
             # probe/USB disconnects make target_connected() wait inside the
             # driver and would freeze every widget, including Disconnect.
             worker_alive = bool(self.worker and self.worker.isRunning() and self.worker.is_link_alive)
             is_alive = bool(self.jlink_native_instance) and (not self.worker or worker_alive)
+            if not self.jlink_native_instance:
+                lost_reason = "J-Link 连接已释放或被其他程序占用"
+
+        if lost_reason and not self.backend_suspended and not self.flash_sequence_active:
+            QTimer.singleShot(0, lambda reason=lost_reason: self._handle_backend_connection_lost(reason))
 
         if is_alive:
             self.heartbeat_state = not self.heartbeat_state
@@ -5847,7 +5899,14 @@ class MCUStudioWindow(QMainWindow):
             self.lbl_status_text.setStyleSheet(f"color: {self.theme_colors['status_ok']}; font-family: 'Microsoft YaHei'; font-size: 13px; font-weight: bold;")
         else:
             self.lbl_led.setStyleSheet("background-color: #d32f2f; border-radius: 5px;")
-            self.lbl_status_text.setText("通信后端已断开" if self.backend_suspended else "链路断开")
+            reconnecting = bool(self.reconnect_worker and self.reconnect_worker.isRunning())
+            if reconnecting:
+                status_text = f"正在后台重连 {self.config.backend_mode}…"
+            elif self.backend_disconnect_reason:
+                status_text = "检测到后端占用或连接丢失，已自动断开；请手动重连"
+            else:
+                status_text = "通信后端已断开" if self.backend_suspended else "链路断开"
+            self.lbl_status_text.setText(status_text)
             self.lbl_status_text.setStyleSheet("color: #ef5350; font-family: 'Microsoft YaHei'; font-size: 13px; font-weight: bold;")
 
     def closeEvent(self, event):

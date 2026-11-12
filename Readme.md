@@ -1,14 +1,14 @@
-# MCU Live Watch Studio V2.2
+# MCU Live Watch Studio V2.3
 
 一个轻量的 Cortex-M 实时变量监视、波形分析与固件烧录工具。
 
-它直接通过 ELF/DWARF 找到变量，再使用 SEGGER J-Link DLL 或 OpenOCD 读写 MCU 内存。固件不需要增加串口协议，也不需要为了观察变量而暂停正在运行的控制系统。适合电机控制、数字电源、传感器、PID 调参和现场状态分析。
+它直接通过 ELF/AXF 中的 DWARF 调试信息找到变量，再使用 SEGGER J-Link DLL 或 OpenOCD 读写 MCU 内存。固件不需要增加串口协议，也不需要为了观察变量而暂停正在运行的控制系统。适合电机控制、数字电源、传感器、PID 调参和现场状态分析。
 
-![MCU Live Watch Studio V2.2 多变量滑动调参与实时波形](assets/screenshots/v2-workspace-sliders.png)
+![MCU Live Watch Studio V2.3 多变量滑动调参与实时波形](assets/screenshots/v2-workspace-sliders.png)
 
-## MCU Live Watch Studio V2.2
+## MCU Live Watch Studio V2.3
 
-V2.2 在实时变量示波器和在线调参基础上加入独立 FFT 频域分析，并完善工具链发现与安全返回配置流程：在同一个工作区中完成 ELF 变量浏览、多个变量滑动调节、时域/频域分析、CSV 导出、固件烧录和断线重连。
+V2.3 支持 ELF/AXF 变量工作流，并完善调试器占用保护：当 J-Link 或 OpenOCD 因其他下载/调试程序占用而失去通信时，软件自动停止读写并释放后端，不会循环抢占；用户手动重连成功后会读取一次磁盘上的最新 ELF/AXF，再恢复监视。
 
 - 多个变量可以同时展开整宽滑动条，范围、步进和写入方式互相独立。
 - 支持拖动、点击滑轨、键盘方向键以及减号/加号长按连续调节，走到边界自动扩展范围。
@@ -18,6 +18,7 @@ V2.2 在实时变量示波器和在线调参基础上加入独立 FFT 频域分�
 - 一个数据库可保存多套项目配置；启动页用紧凑下拉框切换，`+` 新建、`×` 删除，固定的“主配置”不能删除。
 - 高频波形继续保存在内存，长期历史由后台线程批量写入 SQLite；CSV 自动合并数据库与内存尾部。
 - 低速读取、高速采样、变量写入、烧录、重连、ELF 解析和历史保存均不阻塞主界面。
+- 检测到探针被其他程序占用或通信丢失时自动断开，之后只接受手动重连；重连成功会重新读取最新 ELF/AXF。
 - 全项目回归覆盖 500 组用户与组件组合，并对最终 EXE 执行 PyQt6 和主界面启动自检。
 
 ### 一个数据库，多套项目配置
@@ -28,14 +29,14 @@ V2.2 在实时变量示波器和在线调参基础上加入独立 FFT 频域分�
 
 ### 下载版使用
 
-发布附件见 [MCU Live Watch Studio V2.2](https://github.com/1772631792/McuStdio/releases/tag/v2.2.0)。
+发布附件见 [MCU Live Watch Studio V2.3](https://github.com/1772631792/McuStdio/releases/tag/v2.3.0)。
 
 1. `Mcu_Studio.exe`：单文件版，适合已经安装 SEGGER J-Link Software 的用户。
 2. `OpenOCD.zip`：独立 OpenOCD 运行包，可与单文件版搭配使用。
 3. `Mcu_Studio_Portable.zip`：内置 OpenOCD 的完整目录版，解压后整体使用。
 4. 单文件版会优先使用 EXE 同级已有的 `live_watch_history.db`，没有时才使用 `%LOCALAPPDATA%\McuStudio`；目录版放在自身的 `data/` 子目录。
 
-完整变更见 [V2.2 发布说明](doc/releases/RELEASE_NOTES_V2.2.md)。
+完整变更见 [V2.3 发布说明](doc/releases/RELEASE_NOTES_V2.3.md)。
 
 ## 设计目标
 
@@ -176,6 +177,8 @@ FFT 适合分析近似稳态信号。采样率必须高于待观察最高频率�
 
 工作站顶部的断开操作区旁提供“返回配置”图标按钮。返回或关闭程序时会停止采样与变量写入、等待后台线程结束、关闭 TCL socket、终止本软件启动的 OpenOCD 并释放 J-Link 句柄；该流程不会主动发送 `reset`、`halt`、`program` 或烧录命令。烧录或重连尚未完成时会暂时禁止返回，避免中断正在进行的操作。
 
+运行中如果 J-Link/OpenOCD 被其他下载或调试程序占用，或底层通信连接丢失，软件会自动停止采样和变量写入并释放当前后端。软件不会自动循环重连或重新抢占探针；关闭外部程序后需手动点击“重连”。重连成功后会先重新解析当前路径上的最新 ELF/AXF 一次，再恢复采样。
+
 > 返回配置和关闭程序不会主动复位 MCU；但从配置页重新连接 OpenOCD 时，target cfg 的初始化事件是否复位目标取决于对应脚本和探针。不能复位的设备应先进入安全状态再重新连接。
 
 > J-Link 原生模式与 OpenOCD 的 J-Link adapter 是两套驱动链路。Windows 出现 `LIBUSB_ERROR_NOT_SUPPORTED` 时，优先使用 J-Link 原生模式，不要随意替换 SEGGER 官方 USB 驱动。
@@ -195,7 +198,7 @@ python .\main.py
 
 ### 连接和使用
 
-1. 选择包含调试信息的 `.elf` 文件，固件编译时建议保留 `-g`。
+1. 选择包含调试信息的 `.elf` 或 `.axf` 文件，固件编译时建议保留 `-g`。
 2. 选择 J-Link 原生或 OpenOCD 后端并填写对应配置。
 3. 进入工作站，通过顶部输入框或 ELF 变量浏览器添加变量。
 4. 在调试变量上右键，将标量绑定到 CH1、CH2 或 CH3。

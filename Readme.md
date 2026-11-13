@@ -33,11 +33,11 @@ V2.4 优化后端生命周期和大变量列表：配置页不会占用 J-Link/O
 
 ### 下载版使用
 
-V2.4 当前仅提供本地构建，尚未提交或上传 GitHub Release。
+V2.4 可从 [GitHub Release](https://github.com/1772631792/McuStdio/releases/tag/v2.4.0) 下载。
 
 1. `Mcu_Studio.exe`：单文件版，适合已经安装 SEGGER J-Link Software 的用户。
 2. `OpenOCD.zip`：独立 OpenOCD 运行包，可与单文件版搭配使用。
-3. `Mcu_Studio_Portable.zip`：内置 OpenOCD 的完整目录版，解压后整体使用。
+3. `Mcu_Studio_Portable_v2.4.zip`：内置 OpenOCD 的完整目录版，解压后整体使用；根目录中的 `Create_Desktop_Shortcut.cmd` 可一键在桌面创建名为 `Mcu_Studio` 的快捷方式。
 4. 单文件版会优先使用 EXE 同级已有的 `live_watch_history.db`，没有时才使用 `%LOCALAPPDATA%\McuStudio`；目录版放在自身的 `data/` 子目录。
 
 完整变更见 [V2.4 发布说明](doc/releases/RELEASE_NOTES_V2.4.md)。
@@ -267,8 +267,8 @@ McuStdio/
 ├─ assets/                 # 应用图标与 README 截图
 ├─ runtime/OpenOCD/         # 内置 OpenOCD 与 cfg
 ├─ tools/                  # 无硬件校验工具
-├─ doc/                    # 完整使用与维护文档
+├─ doc/                    # 精简的专题、构建与版本文档
 └─ live_watch_history.db   # 源码运行产生的本机工作状态
 ```
 
-更详细的连接、变量、烧录、数据库迁移、构建和故障排查说明见 [文档目录](doc/README.md)。第三方组件保留各自许可证。
+连接与后端、变量与波形、构建发布和测试说明见 [精简文档目录](doc/README.md)。第三方组件保留各自许可证。

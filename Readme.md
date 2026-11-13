@@ -1,14 +1,14 @@
-# MCU Live Watch Studio V2.3
+# MCU Live Watch Studio V2.4
 
 一个轻量的 Cortex-M 实时变量监视、波形分析与固件烧录工具。
 
 它直接通过 ELF/AXF 中的 DWARF 调试信息找到变量，再使用 SEGGER J-Link DLL 或 OpenOCD 读写 MCU 内存。固件不需要增加串口协议，也不需要为了观察变量而暂停正在运行的控制系统。适合电机控制、数字电源、传感器、PID 调参和现场状态分析。
 
-![MCU Live Watch Studio V2.3 多变量滑动调参与实时波形](assets/screenshots/v2-workspace-sliders.png)
+![MCU Live Watch Studio V2.4 多变量滑动调参与实时波形](assets/screenshots/v2-workspace-sliders.png)
 
-## MCU Live Watch Studio V2.3
+## MCU Live Watch Studio V2.4
 
-V2.3 支持 ELF/AXF 变量工作流，并完善调试器占用保护：当 J-Link 或 OpenOCD 因其他下载/调试程序占用而失去通信时，软件自动停止读写并释放后端，不会循环抢占；用户手动重连成功后会读取一次磁盘上的最新 ELF/AXF，再恢复监视。
+V2.4 优化后端生命周期和大变量列表：配置页不会占用 J-Link/OpenOCD，进入工作站后才后台连接；窗口 X 始终可以直接退出，不再等待卡住的重连；变量只按可见与展开状态分批读取，并支持在主调试窗口与悬浮窗口之间拖放。
 
 - 多个变量可以同时展开整宽滑动条，范围、步进和写入方式互相独立。
 - 支持拖动、点击滑轨、键盘方向键以及减号/加号长按连续调节，走到边界自动扩展范围。
@@ -19,6 +19,10 @@ V2.3 支持 ELF/AXF 变量工作流，并完善调试器占用保护：当 J-Lin
 - 高频波形继续保存在内存，长期历史由后台线程批量写入 SQLite；CSV 自动合并数据库与内存尾部。
 - 低速读取、高速采样、变量写入、烧录、重连、ELF 解析和历史保存均不阻塞主界面。
 - 检测到探针被其他程序占用或通信丢失时自动断开，之后只接受手动重连；重连成功会重新读取最新 ELF/AXF。
+- 配置页只校验调试工具，不打开探针；工作站显示后才异步启动 J-Link/OpenOCD。
+- 标题栏 X 拥有最高退出优先级：停止软件任务、关闭套接字和 OpenOCD 后直接退出，不等待卡住的 J-Link 重连。
+- 大量变量按当前可见区域和结构体展开状态读取，每轮最多处理 32 个叶子变量并轮询其余项目。
+- 变量可在三个调试窗口之间拖放；结构体成员可拖成独立顶层变量，直接打开滑动调节。
 - 全项目回归覆盖 500 组用户与组件组合，并对最终 EXE 执行 PyQt6 和主界面启动自检。
 
 ### 一个数据库，多套项目配置
@@ -29,14 +33,14 @@ V2.3 支持 ELF/AXF 变量工作流，并完善调试器占用保护：当 J-Lin
 
 ### 下载版使用
 
-发布附件见 [MCU Live Watch Studio V2.3](https://github.com/1772631792/McuStdio/releases/tag/v2.3.0)。
+V2.4 当前仅提供本地构建，尚未提交或上传 GitHub Release。
 
 1. `Mcu_Studio.exe`：单文件版，适合已经安装 SEGGER J-Link Software 的用户。
 2. `OpenOCD.zip`：独立 OpenOCD 运行包，可与单文件版搭配使用。
 3. `Mcu_Studio_Portable.zip`：内置 OpenOCD 的完整目录版，解压后整体使用。
 4. 单文件版会优先使用 EXE 同级已有的 `live_watch_history.db`，没有时才使用 `%LOCALAPPDATA%\McuStudio`；目录版放在自身的 `data/` 子目录。
 
-完整变更见 [V2.3 发布说明](doc/releases/RELEASE_NOTES_V2.3.md)。
+完整变更见 [V2.4 发布说明](doc/releases/RELEASE_NOTES_V2.4.md)。
 
 ## 设计目标
 

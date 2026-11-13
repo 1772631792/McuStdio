@@ -67,6 +67,15 @@ def validate_imports_and_elf_helpers() -> None:
         and "*.axf" in ui.FIRMWARE_FILE_FILTER,
         "firmware picker accepts ELF and AXF files",
     )
+    first_batch, next_offset = ui.rotating_batch(list(range(70)), 0, 32)
+    second_batch, final_offset = ui.rotating_batch(list(range(70)), next_offset, 32)
+    check(
+        len(first_batch) == len(second_batch) == 32
+        and first_batch == list(range(32))
+        and second_batch == list(range(32, 64))
+        and final_offset == 64,
+        "large visible watch lists are read in bounded round-robin batches",
+    )
     check(
         ui.QMessageBox is ui.SilentMessageBox,
         "application dialogs use the silent message box implementation",
@@ -324,6 +333,12 @@ def validate_imports_and_elf_helpers() -> None:
             studio = ui.MCUStudioWindow(config, test_database)
         studio.show()
         application.processEvents()
+        check(
+            studio.backend_suspended
+            and studio.jlink_native_instance is None
+            and studio.reconnect_worker is None,
+            "workspace UI is created before any debugger backend is claimed",
+        )
 
         old_state = core.ElfDatabase()
         old_state.symbols = {"state": 0x20000000}
@@ -421,6 +436,7 @@ def validate_imports_and_elf_helpers() -> None:
         )
 
         studio.backend_suspended = True
+        studio.initial_backend_connect = False
         studio.config.backend_mode = "JLINK"
         fake_backend = object()
         with patch.object(studio, "reload_elf_symbols", return_value=(True, "latest firmware loaded")) as reload_latest, patch.object(
@@ -433,7 +449,7 @@ def validate_imports_and_elf_helpers() -> None:
                 "source": "reconnect",
                 "restart_sampling": False,
             }
-            and finish_reconnect.call_args.args == (True, "latest firmware loaded"),
+            and finish_reconnect.call_args.args == (True, "latest firmware loaded", False),
             "manual reconnect reloads the latest ELF or AXF once before sampling resumes",
         )
         studio.jlink_native_instance = None
@@ -442,6 +458,48 @@ def validate_imports_and_elf_helpers() -> None:
         studio.backend_disconnect_reason = ""
 
         check(studio.tab_widget.count() == 3, "three fixed debug windows are created")
+        check(
+            all(isinstance(tree, ui.DebugVariableTree) for tree in studio.debug_trees.values()),
+            "docked and floating debug trees share variable drag-and-drop support",
+        )
+        studio.backend_suspended = True
+        test_database.save_var("controller.gain", "float", 4, "controller", 0)
+        studio.inject_var_to_tree_ui("controller.gain", "float", 0)
+        studio.move_debug_variable("controller.gain", 0, 1, is_member=True)
+        standalone_item = next(
+            (
+                studio.debug_trees[1].topLevelItem(index)
+                for index in range(studio.debug_trees[1].topLevelItemCount())
+                if studio.debug_trees[1].topLevelItem(index).data(0, Qt.ItemDataRole.UserRole)
+                    == "controller.gain"
+                and studio.debug_trees[1].topLevelItem(index).data(
+                    0, int(Qt.ItemDataRole.UserRole) + 1
+                ) == "standalone"
+            ),
+            None,
+        )
+        check(
+            "controller.gain" in test_database.get_var_map(0)
+            and "controller.gain" in test_database.get_var_map(1)
+            and standalone_item is not None,
+            "a structure member can be dragged out as an independent tuning item",
+        )
+        test_database.save_var("movable", "uint32_t", 0, "movable", 0)
+        studio.inject_var_to_tree_ui("movable", "uint32_t", 0)
+        studio.move_debug_variable("movable", 0, 2, is_member=False)
+        check(
+            "movable" not in test_database.get_var_map(0)
+            and "movable" in test_database.get_var_map(2),
+            "a top-level watch moves between the main and floating-capable debug windows",
+        )
+        # Keep the drag-and-drop fixture isolated from the original UI tests
+        # below, which intentionally assume an empty watch tree.
+        test_database.delete_var("controller.gain", 0)
+        test_database.delete_var("controller.gain", 1)
+        test_database.delete_var("movable", 2)
+        studio.standalone_debug_variables.discard("1:controller.gain")
+        studio._save_standalone_debug_variables()
+        studio._rebuild_debug_trees()
         check(studio.debug_trees[0].headerItem().text(0) == "全局变量", "debug variable column uses the compact title")
         studio.centralWidget().layout().activate()
         application.processEvents()

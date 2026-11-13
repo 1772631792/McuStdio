@@ -17,6 +17,7 @@
 ## 版本记录
 
 - [更新记录](releases/CHANGELOG.md)
+- [V2.4 发布说明](releases/RELEASE_NOTES_V2.4.md)
 - [V2.3 发布说明](releases/RELEASE_NOTES_V2.3.md)
 - [V2.2 发布说明](releases/RELEASE_NOTES_V2.2.md)
 

@@ -21,12 +21,13 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QFormLayout, QCheckBox as _QCheckBox, QSplitter, QTextEdit,
                              QRadioButton, QButtonGroup, QTabWidget, QFrame, QTabBar,
                              QStyle, QStyleOptionButton, QProgressBar, QSlider, QScrollArea,
-                             QSpinBox, QInputDialog)
+                             QSpinBox, QInputDialog, QAbstractItemView)
 from PyQt6.QtCore import (QTimer, Qt, QEvent, pyqtSignal, QVariantAnimation, QMutex,
-                          QMutexLocker, QPointF, QRectF, QSize, QThread, QEventLoop)
+                          QMutexLocker, QPointF, QRectF, QSize, QThread, QEventLoop,
+                          QMimeData)
 from PyQt6.QtGui import (QFont, QKeyEvent, QIntValidator, QDoubleValidator, QColor,
                          QAction, QPen, QIcon, QPainter, QPalette, QPainterPath,
-                         QPixmap, QRegion)
+                         QPixmap, QRegion, QDrag)
 
 import pyqtgraph as pg
 
@@ -487,6 +488,69 @@ class DetachableTabBar(QTabBar):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+
+class DebugVariableTree(QTreeWidget):
+    """Watch tree supporting variable moves between docked and floating panes."""
+
+    MIME_TYPE = "application/x-mcu-studio-variable"
+
+    def __init__(self, owner, slot, parent=None):
+        super().__init__(parent)
+        self.owner = owner
+        self.slot = int(slot)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def startDrag(self, _supported_actions):
+        item = self.currentItem()
+        if item is None or item.data(0, self.owner.SLIDER_CONTROL_ROLE):
+            return
+        path = str(item.data(0, Qt.ItemDataRole.UserRole) or "").strip()
+        if not path:
+            return
+        payload = {
+            "path": path,
+            "source_slot": self.slot,
+            "is_member": item.parent() is not None,
+        }
+        mime = QMimeData()
+        mime.setData(self.MIME_TYPE, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(self.MIME_TYPE):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat(self.MIME_TYPE):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if not event.mimeData().hasFormat(self.MIME_TYPE):
+            super().dropEvent(event)
+            return
+        try:
+            payload = json.loads(bytes(event.mimeData().data(self.MIME_TYPE)).decode("utf-8"))
+            self.owner.move_debug_variable(
+                str(payload["path"]),
+                int(payload["source_slot"]),
+                self.slot,
+                bool(payload.get("is_member")),
+            )
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            event.ignore()
 
 
 class FloatingDebugWindow(QDialog):
@@ -1634,12 +1698,10 @@ class LoginConfigDialog(QDialog):
 
             try:
                 validate_openocd_config(self.config)
-                stop_managed_openocd(self.config)
-                launch_openocd(self.config)
             except Exception as exc:
                 message = self._friendly_openocd_error(exc)
-                self.lbl_hardware_status.setText(f"OpenOCD 启动失败：{message}")
-                QMessageBox.critical(self, "OpenOCD 启动失败", message)
+                self.lbl_hardware_status.setText(f"OpenOCD 配置无效：{message}")
+                QMessageBox.critical(self, "OpenOCD 配置无效", message)
                 return
         else: 
             jlink_dir = self.jlink_dir_edit.text().strip()
@@ -1793,6 +1855,17 @@ def variable_write_available(backend_suspended, flash_active, backend_mode,
     if str(backend_mode).upper() == "JLINK":
         return bool(jlink_connected)
     return bool(openocd_connected)
+
+
+def rotating_batch(items, offset, limit=32):
+    """Return a bounded fair slice and the next round-robin offset."""
+    values = list(items)
+    if not values:
+        return [], 0
+    size = min(max(1, int(limit)), len(values))
+    start = int(offset) % len(values)
+    selected = [values[(start + index) % len(values)] for index in range(size)]
+    return selected, (start + size) % len(values)
 
 
 class InlineVariableSlider(QWidget):
@@ -2417,8 +2490,11 @@ class MCUStudioWindow(QMainWindow):
         self.sampling_restart_pending = False
         self.backend_close_workers = []
         self.reconnect_worker = None
-        self.backend_suspended = False
+        # The configuration page never claims a probe. The first backend
+        # connection starts asynchronously only after the workspace is shown.
+        self.backend_suspended = True
         self.backend_disconnect_reason = ""
+        self.initial_backend_connect = True
         self.flash_sequence_active = False
         self.elf_reload_in_progress = False
         self.elf_update_pending = False
@@ -2426,6 +2502,14 @@ class MCUStudioWindow(QMainWindow):
         self.jlink_lock = threading.RLock()
         self.openocd_link_alive = False  
         self.latest_values = {}
+        self.low_speed_round_robin_offset = 0
+        try:
+            standalone = json.loads(self.db.get_config("standalone_debug_variables_v1", "[]"))
+        except (TypeError, ValueError):
+            standalone = []
+        self.standalone_debug_variables = {
+            str(value) for value in standalone if isinstance(value, str) and ":" in value
+        }
         try:
             inline_state = json.loads(self.db.get_config(self.INLINE_SLIDER_STATE_KEY, "{}"))
         except (TypeError, ValueError):
@@ -2488,7 +2572,6 @@ class MCUStudioWindow(QMainWindow):
         self.pending_workspace_splitter_sizes = None
         self.initial_workspace_loaded = False
 
-        self.init_global_link_backend()
         self.init_ui()
         self.variable_write_worker = VariableWriteWorker(
             self.config, self.jlink_native_instance, self.jlink_lock, self
@@ -2541,6 +2624,13 @@ class MCUStudioWindow(QMainWindow):
             QTimer.singleShot(0, lambda path=elf_path: self._start_initial_elf_load(path))
         else:
             self._finish_initial_workspace_load(synchronize_elf=False)
+        QTimer.singleShot(0, self._start_initial_backend_connection)
+
+    def _start_initial_backend_connection(self):
+        if os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen":
+            self.lbl_status_text.setText("离屏自检：未占用调试后端")
+            return
+        self.force_reconnect_engine(initial=True)
 
     def init_global_link_backend(self):
         if self.backend_suspended:
@@ -3281,7 +3371,7 @@ class MCUStudioWindow(QMainWindow):
         slot = next(index for index in range(3) if index not in self.debug_trees)
         if not name: name = f"调试窗口 {slot + 1}"
             
-        tree = QTreeWidget()
+        tree = DebugVariableTree(self, slot)
         tree.setColumnCount(3)
         tree.setHeaderLabels(["全局变量", "数据类型", "实时值（5 Hz）"])
         tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -3291,6 +3381,7 @@ class MCUStudioWindow(QMainWindow):
         tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         tree.customContextMenuRequested.connect(self.show_context_menu)
         tree.itemDoubleClicked.connect(self.handle_tree_item_double_clicked)
+        tree.setToolTip("拖动变量可移动到其他调试窗口；结构体成员拖到空白处会成为独立调节项")
 
         new_idx = self.tab_widget.addTab(tree, name)
         tree.setProperty("debug_tab_slot", slot)
@@ -4109,9 +4200,10 @@ class MCUStudioWindow(QMainWindow):
             self.lbl_status_text.setText("OpenOCD 烧录失败")
             self._set_flash_progress("failed", details=message)
 
-    def force_reconnect_engine(self):
+    def force_reconnect_engine(self, initial=False):
         if self.reconnect_worker and self.reconnect_worker.isRunning():
             return
+        self.initial_backend_connect = bool(initial)
         self._execute_flash_animation(self.btn_reconnect, "#00b0ff", "")
         self.backend_suspended = True
         self.backend_disconnect_reason = ""
@@ -4149,6 +4241,8 @@ class MCUStudioWindow(QMainWindow):
     def _backend_reconnect_finished(self, success, error, backend):
         worker = self.reconnect_worker
         self.reconnect_worker = None
+        initial_connect = self.initial_backend_connect
+        self.initial_backend_connect = False
         if success:
             if self.config.backend_mode == "OPENOCD":
                 self.tcl_socket = backend
@@ -4165,15 +4259,16 @@ class MCUStudioWindow(QMainWindow):
         self.btn_mcu_reset.setEnabled(True)
         reload_ok = None
         reload_message = ""
-        if success:
+        if success and not initial_connect:
             reload_ok, reload_message = self.reload_elf_symbols(
                 show_message=False,
                 source="reconnect",
                 restart_sampling=False,
             )
-        self._finish_backend_reconnect(reload_ok, reload_message)
+        self._finish_backend_reconnect(reload_ok, reload_message, initial_connect)
         if not success:
-            QMessageBox.critical(self, f"{self.config.backend_mode} 重连失败", error)
+            title = f"{self.config.backend_mode} {'连接' if initial_connect else '重连'}失败"
+            QMessageBox.critical(self, title, error)
 
     def disconnect_backend(self):
         if self.flash_sequence_active:
@@ -4248,12 +4343,14 @@ class MCUStudioWindow(QMainWindow):
         elif error:
             self.lbl_status_text.setText(f"后端已停止读写；驱动释放异常：{error}")
 
-    def _finish_backend_reconnect(self, reload_ok=None, reload_message=""):
+    def _finish_backend_reconnect(self, reload_ok=None, reload_message="", initial_connect=False):
         connected = (self.openocd_link_alive if self.config.backend_mode == "OPENOCD"
                      else bool(self.jlink_native_instance))
         self.btn_disconnect.setEnabled(connected)
         self.btn_reconnect.setEnabled(True)
-        if connected and reload_ok is True:
+        if connected and initial_connect:
+            self.lbl_status_text.setText("通信后端连接完成")
+        elif connected and reload_ok is True:
             self.lbl_status_text.setText("通信后端重连完成，已读取最新 ELF/AXF")
         elif connected and reload_ok is False:
             self.lbl_status_text.setText("通信后端重连完成；ELF/AXF 读取失败，保留原变量映射")
@@ -4487,6 +4584,87 @@ class MCUStudioWindow(QMainWindow):
             path, v_type, offset, base_var = row[0], row[1], row[2], row[3]
             t_idx = row[4] if len(row) > 4 else 0
             if '.' in path or '[' in path: self.inject_var_to_tree_ui(path, v_type, t_idx)
+        for key in sorted(self.standalone_debug_variables):
+            try:
+                slot_text, path = key.split(":", 1)
+                slot = int(slot_text)
+            except (TypeError, ValueError):
+                continue
+            row = next(
+                (item for item in db_vars if int(item[4]) == slot and item[0] == path),
+                None,
+            )
+            if row is not None:
+                self.inject_standalone_variable_ui(path, row[1], slot)
+
+    def _save_standalone_debug_variables(self):
+        self.db.save_config(
+            "standalone_debug_variables_v1",
+            json.dumps(sorted(self.standalone_debug_variables), ensure_ascii=False),
+        )
+
+    def inject_standalone_variable_ui(self, path, v_type, tab_idx):
+        tree = self.debug_trees.get(int(tab_idx))
+        if tree is None:
+            return
+        for index in range(tree.topLevelItemCount()):
+            existing = tree.topLevelItem(index)
+            if (existing.data(0, Qt.ItemDataRole.UserRole) == path
+                    and existing.data(0, int(Qt.ItemDataRole.UserRole) + 1) == "standalone"):
+                return
+        type_info = self.type_info_for_path(path)
+        value_text = "{结构体/数组}" if type_info is not None and not scalar_size(type_info) else "读取中..."
+        item = QTreeWidgetItem([path, v_type, value_text])
+        item.setData(0, Qt.ItemDataRole.UserRole, path)
+        item.setData(0, int(Qt.ItemDataRole.UserRole) + 1, "standalone")
+        item.setToolTip(0, "从结构体中拖出的独立变量；可直接右键打开滑动调节")
+        tree.addTopLevelItem(item)
+
+    def _rebuild_debug_trees(self):
+        for tree in self.debug_trees.values():
+            tree.clear()
+        self.inline_slider_widgets.clear()
+        self.inline_slider_contexts.clear()
+        self.load_history_from_db(synchronize_elf=False)
+        self.restart_sampling_thread()
+
+    def move_debug_variable(self, path, source_slot, target_slot, is_member=False):
+        source_slot, target_slot = int(source_slot), int(target_slot)
+        rows = self.db.get_all_vars()
+        source_rows = [row for row in rows if int(row[4]) == source_slot]
+        selected = next((row for row in source_rows if row[0] == path), None)
+        if selected is None or target_slot not in self.debug_trees:
+            return
+
+        if is_member:
+            # A member remains inside its original structure and is copied as
+            # an independently tunable top-level watch in the drop target.
+            self.db.save_var(path, selected[1], selected[2], selected[3], target_slot)
+            self.standalone_debug_variables.add(f"{target_slot}:{path}")
+        else:
+            root = selected[3] or path
+            moving = [
+                row for row in source_rows
+                if row[3] == root or row[0] == root
+                or row[0].startswith(root + ".") or row[0].startswith(root + "[")
+            ]
+            if source_slot == target_slot:
+                return
+            for row in moving:
+                self.db.save_var(row[0], row[1], row[2], row[3], target_slot)
+                self.db.delete_var(row[0], source_slot)
+            moved_keys = {
+                key for key in self.standalone_debug_variables
+                if key.startswith(f"{source_slot}:")
+                and key.split(":", 1)[1] in {row[0] for row in moving}
+            }
+            self.standalone_debug_variables.difference_update(moved_keys)
+            self.standalone_debug_variables.update(
+                f"{target_slot}:{key.split(':', 1)[1]}" for key in moved_keys
+            )
+        self._save_standalone_debug_variables()
+        self._rebuild_debug_trees()
+        self.lbl_status_text.setText(f"已将 {path} 移到{self.debug_titles[target_slot]}")
 
     def synchronize_saved_variables_with_elf(self, remove_missing=False):
         """Rebuild every named watch from the active ELF for all debug windows."""
@@ -5702,6 +5880,7 @@ class MCUStudioWindow(QMainWindow):
 
         pending = {}
         requests = {}
+        candidates = []
 
         def collect_item(item, t_idx):
             if item.data(0, self.SLIDER_CONTROL_ROLE):
@@ -5749,8 +5928,10 @@ class MCUStudioWindow(QMainWindow):
                 norm_type = v_type.replace("_t", "").strip().lower()
                 size = 1 if "int8" in norm_type or "char" in norm_type else (2 if "int16" in norm_type else 4)
             read_key = (absolute_address, size)
-            requests[read_key] = (read_key, absolute_address, size)
-            pending[(t_idx, path)] = (item, read_key, type_info, v_type, cell_widget)
+            candidates.append(
+                ((t_idx, path), (item, read_key, type_info, v_type, cell_widget),
+                 (read_key, absolute_address, size))
+            )
 
         for tab_index in sorted(active_tabs):
             tree = self.debug_trees.get(tab_index)
@@ -5758,8 +5939,17 @@ class MCUStudioWindow(QMainWindow):
                 for item_index in range(tree.topLevelItemCount()):
                     collect_item(tree.topLevelItem(item_index), tab_index)
 
-        if not requests:
+        if not candidates:
             return
+        # A large watch list must not create one huge driver transaction. Only
+        # visible top-level scalars and leaves below expanded containers reach
+        # this list; rotate through them in bounded batches for fair refreshes.
+        selected, self.low_speed_round_robin_offset = rotating_batch(
+            candidates, self.low_speed_round_robin_offset, 32
+        )
+        for pending_key, pending_value, request in selected:
+            pending[pending_key] = pending_value
+            requests[request[0]] = request
         self.low_speed_pending = pending
         self.low_speed_worker = LowSpeedReadWorker(
             self.config,
@@ -5909,7 +6099,68 @@ class MCUStudioWindow(QMainWindow):
             self.lbl_status_text.setText(status_text)
             self.lbl_status_text.setStyleSheet("color: #ef5350; font-family: 'Microsoft YaHei'; font-size: 13px; font-weight: bold;")
 
+    def _force_close_from_titlebar(self, event):
+        """Best-effort release followed by an unconditional process exit."""
+        try:
+            self.save_workspace_state()
+        except Exception:
+            pass
+        self.backend_suspended = True
+        for timer_name in (
+            "timer_table", "timer_plot", "timer_heartbeat", "elf_watch_timer",
+            "workspace_save_timer",
+        ):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                timer.stop()
+        worker = getattr(self, "worker", None)
+        if worker is not None:
+            worker.running = False
+            worker.stop(0)
+        low_speed = getattr(self, "low_speed_worker", None)
+        if low_speed is not None:
+            low_speed.stop(0)
+        writer = getattr(self, "variable_write_worker", None)
+        if writer is not None:
+            writer.cancel_pending()
+            writer.stop(0)
+            writer.update_jlink(None)
+        history = getattr(self, "history_writer", None)
+        if history is not None:
+            history.stop(0)
+        for sock_name in ("tcl_socket",):
+            sock = getattr(self, sock_name, None)
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                setattr(self, sock_name, None)
+        process = getattr(self.config, "openocd_process", None)
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+            except Exception:
+                pass
+        # Never call into a possibly wedged J-Link DLL from the title-bar close
+        # path. Windows releases the native handle when the process exits.
+        self.jlink_native_instance = None
+        event.accept()
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+            app.quit()
+        if os.environ.get("QT_QPA_PLATFORM", "").lower() != "offscreen":
+            os._exit(0)
+
     def closeEvent(self, event):
+        if self._close_destination != "config":
+            self._force_close_from_titlebar(event)
+            return
         if self.flash_sequence_active:
             QMessageBox.information(self, "正在烧录", "Flash 烧录尚未完成，为避免中断导致芯片无法启动，请等待烧录结束。")
             event.ignore()

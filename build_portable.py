@@ -12,6 +12,7 @@ import build
 
 PORTABLE_MARKER = "portable-mode.flag"
 OPENOCD_SOURCE = build.PROJECT_ROOT / "runtime" / "OpenOCD"
+SHORTCUT_SCRIPT = build.PROJECT_ROOT / "packaging" / "Create_Desktop_Shortcut.cmd"
 
 
 def main() -> int:
@@ -24,6 +25,8 @@ def main() -> int:
         raise FileNotFoundError(
             "Portable build requires runtime/OpenOCD/bin/openocd.exe and its scripts"
         )
+    if not SHORTCUT_SCRIPT.is_file():
+        raise FileNotFoundError(f"Portable shortcut script is missing: {SHORTCUT_SCRIPT}")
 
     release_dir = build.DIST_DIR / app_name
     executable = release_dir / f"{app_name}.exe"
@@ -62,16 +65,21 @@ def main() -> int:
         "MCU Studio portable data directory marker.\n",
         encoding="utf-8",
     )
+    bundled_shortcut_script = release_dir / SHORTCUT_SCRIPT.name
+    shutil.copy2(SHORTCUT_SCRIPT, bundled_shortcut_script)
 
     build.inspect_onedir(release_dir)
     build.run_packaged_self_test(executable, env)
     if not (bundled_openocd / "bin" / "openocd.exe").is_file():
         raise FileNotFoundError("Bundled OpenOCD verification failed")
+    if not bundled_shortcut_script.is_file():
+        raise FileNotFoundError("Desktop shortcut script verification failed")
 
     print(f"\nPortable build succeeded: {release_dir}")
     print(f"Application: {executable}")
     print(f"Bundled OpenOCD: {bundled_openocd}")
     print(f"Portable data directory: {release_dir / 'data'}")
+    print(f"Desktop shortcut script: {bundled_shortcut_script}")
     return 0
 
 

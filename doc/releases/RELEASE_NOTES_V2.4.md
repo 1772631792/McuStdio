@@ -12,6 +12,7 @@ V2.4 聚焦重连卡死时的退出可靠性、调试器占用时机、大变量
 - 每轮最多读取 32 个低速变量，并使用轮询偏移保证大列表中的变量都能持续更新。
 - 顶层变量可以在三个调试窗口之间拖动，窗口悬浮后仍可接收拖放。
 - 结构体成员可以拖成独立顶层变量，保留原结构显示的同时便于直接打开滑动调节。
+- 便携包增加 `Create_Desktop_Shortcut.cmd`，双击即可在桌面创建名为 `Mcu_Studio` 的快捷方式。
 
 ## 构建状态
 
@@ -20,5 +21,5 @@ V2.4 聚焦重连卡死时的退出可靠性、调试器占用时机、大变量
 ## SHA256
 
 - `Mcu_Studio.exe`: `50B18487D5E2400CAD9251D81EE9AE44218CDF90CF0063773E5F99F9B7B75C01`
-- `Mcu_Studio_Portable_v2.4.zip`: `777C50FD5901C575E298D4E534433FD7DE50A5D70DDE52FB35F341C8EDA3FBEF`
+- `Mcu_Studio_Portable_v2.4.zip`: `E4452ACB710D5F6713F32FCBD2BB63888D39223DB49FF961512EA40D75ACD01D`
 - `OpenOCD.zip`: `1AC8CEDC1797CE739116FF5DCBE6235D9D1060D43427FD749D808D8BC8C5F870`

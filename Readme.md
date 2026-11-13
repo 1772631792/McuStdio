@@ -31,9 +31,9 @@ V2.4 优化后端生命周期和大变量列表：配置页不会占用 J-Link/O
 
 启动页通过简洁的下拉框管理项目配置：固定的“主配置”不能删除，`+` 新建配置，`×` 删除当前非主配置，“清空配置”保留名称但清除当前配置在数据库中的 UI 状态、ELF 与后端设置、监视变量、滑动条、波形绑定和历史采样。清空后的历史采样不再参与后续 CSV 导出；已经导出到磁盘的 CSV 文件不会被删除。
 
-### 下载版使用
+### 发布附件说明
 
-V2.4 可从 [GitHub Release](https://github.com/1772631792/McuStdio/releases/tag/v2.4.0) 下载。
+V2.4 [GitHub Release 页面](https://github.com/1772631792/McuStdio/releases/tag/v2.4.0)已经建立，安装包附件暂缓上传。计划提供以下三种附件：
 
 1. `Mcu_Studio.exe`：单文件版，适合已经安装 SEGGER J-Link Software 的用户。
 2. `OpenOCD.zip`：独立 OpenOCD 运行包，可与单文件版搭配使用。

@@ -1,4 +1,4 @@
-# AI 协作入口（McuStudio V2.5）
+# AI 协作入口（McuStudio V2.5.5）
 
 > 给 AI 助手和新协作者的入口文档。需要完整细节时读 [`doc/AI_ARCHITECTURE.md`](doc/AI_ARCHITECTURE.md)。
 > 本文只讲**代码在哪、谁调谁、什么不能改**，不重复用户功能说明（那部分在 [`Readme.md`](Readme.md)）。
@@ -115,16 +115,25 @@ flash_elf_by_user（backend.py）
 
 ```
 closeEvent（close.py）
-├─ spontaneous（X/Alt+F4）→ _force_close_from_titlebar → os._exit(0)
-└─ 返回配置 → 停线程（300/500ms）→ 异步关句柄
-              → 仍有线程则每 250ms 重试，最多 8 次 → 强制退出
+├─ _closing_for_config=False（X / Alt+F4 / 任务栏 / 任何内部 close）
+│  └─ _force_close_from_titlebar()
+│     ├─ 停 UI 定时器、标记采样/写值线程停止（不 join）
+│     ├─ 关 TCL socket、终止本软件启动的 OpenOCD
+│     ├─ daemon 线程持 jlink_lock 关 J-Link（≤350 ms）
+│     └─ os._exit(0)   # 系统回收句柄，探针随进程释放
+└─ _closing_for_config=True（仅“返回配置”）
+   ├─ save_workspace_state()（可能等 SQLite 写锁）
+   └─ 停线程 → 异步关句柄 → 2 秒上限 → 回配置页
 ```
+
+诊断：`%TEMP%\mcu_shutdown_trace.log`。没有 `closeEvent` 行说明 GUI 线程在事件到达前已被阻塞；有行但停在某步说明该步阻塞。
 
 ## 6. 硬约束（改代码前必读）
 
 - 拆分/重构只搬代码，不改行为；行为变更单独提交。
 - `mcu_studio/ui.py` 必须保留并继续 re-export 外部用到的名字（`MCUStudioWindow`、`LoginConfigDialog`、`QMessageBox`、`FIRMWARE_FILE_FILTER`、`SilentMessageBox`、`DebugVariableTree`、`ElfVariableDialog`、`InlineVariableSlider`、`automatic_slider_profile`、`rotating_batch`）。
 - 不在 GUI 线程新增 `pylink`/socket/串口调用；所有硬件访问进 `QThread` 并遵守 `jlink_lock`。
+- 标题栏关闭路径禁止写数据库、`join()` 线程或直接调用 `JLink.close()`；J-Link 关闭必须放 daemon 线程并有时限（当前 350 ms）。
 - 不要删除 `retired_workers` / `backend_close_workers` 的引用管理。
 - `ui_parts/theme.py` 的 QSS 字符串不要被格式化工具重排。
 - `workers.py` 的信号名（`data_received`、`link_lost`、`finished_signal`、`error_signal`）被按名字连接，改名会静默断链。

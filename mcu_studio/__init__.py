@@ -1,6 +1,6 @@
 """MCU Live Watch Studio application package."""
 
-__version__ = "2.5.0"
+__version__ = "2.5.5"
 
 __all__ = ["__version__", "run_application"]
 

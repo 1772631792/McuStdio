@@ -61,6 +61,7 @@ class _WindowLifecycleMixin:
         self.db = db
         self._close_destination = "exit"
         self._returning_to_config = False
+        self._closing_for_config = False
         self._close_retry_count = 0
         self._session_closed_emitted = False
         self._shutdown_jlink_started = False

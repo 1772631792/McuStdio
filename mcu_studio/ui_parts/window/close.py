@@ -1,12 +1,16 @@
 """Application shutdown: forced exit, graceful close and bounded retries."""
 
+import tempfile
+
 from ..common import (
     QApplication,
     QThread,
     QTimer,
+    __version__,
     os,
-    socket,
     stop_managed_openocd,
+    threading,
+    time,
 )
 from ..widgets import (
     QMessageBox,
@@ -14,12 +18,27 @@ from ..widgets import (
 
 
 class _WindowCloseMixin:
-    def _force_close_from_titlebar(self, event):
-        """Best-effort release followed by an unconditional process exit."""
+    def _trace_close(self, message):
+        """Append one line to %TEMP%\\mcu_shutdown_trace.log for field reports."""
         try:
-            self.save_workspace_state()
+            path = os.path.join(tempfile.gettempdir(), "mcu_shutdown_trace.log")
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S')} v{__version__} {message}\n"
+                )
         except Exception:
             pass
+
+    def _force_close_from_titlebar(self, event):
+        """Disconnect best-effort, then exit without waiting for anything.
+
+        The GUI thread must never wait on the SQLite write lock, a worker thread
+        or the vendor DLL here; Windows marks the window "not responding" as soon
+        as that happens.  Sampling is flagged to stop, the OpenOCD child process
+        is terminated, and the J-Link handle is closed on a daemon thread with a
+        350 ms budget.  Anything still busy is released by process exit.
+        """
+        self._trace_close("force-close: start")
         self.backend_suspended = True
         for timer_name in (
             "timer_table", "timer_plot", "timer_heartbeat", "elf_watch_timer",
@@ -28,75 +47,84 @@ class _WindowCloseMixin:
             timer = getattr(self, timer_name, None)
             if timer is not None:
                 timer.stop()
-        worker = getattr(self, "worker", None)
-        if worker is not None:
-            worker.running = False
-            worker.stop(0)
-        low_speed = getattr(self, "low_speed_worker", None)
-        if low_speed is not None:
-            low_speed.stop(0)
-        writer = getattr(self, "variable_write_worker", None)
-        if writer is not None:
-            writer.cancel_pending()
-            writer.stop(0)
-            writer.update_jlink(None)
-        history = getattr(self, "history_writer", None)
-        if history is not None:
-            history.stop(0)
-        for sock_name in ("tcl_socket",):
-            sock = getattr(self, sock_name, None)
-            if sock is not None:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-                setattr(self, sock_name, None)
+        self._trace_close("force-close: timers stopped")
+
+        # Flag the background loops so they stop after their current native call
+        # instead of issuing new ones.  Never join them from the GUI thread.
+        for attribute in ("worker", "low_speed_worker", "variable_write_worker"):
+            background = getattr(self, attribute, None)
+            if background is not None:
+                setattr(background, "running", False)
+
+        sock = getattr(self, "tcl_socket", None)
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            self.tcl_socket = None
+
         process = getattr(self.config, "openocd_process", None)
         if process is not None and process.poll() is None:
             try:
                 process.terminate()
             except Exception:
                 pass
-        # Never call into a possibly wedged J-Link DLL from the title-bar close
-        # path. Windows releases the native handle when the process exits.
+        self._trace_close("force-close: backend stopped")
+
+        # Close the probe on a helper thread: JLINKARM_Close can block for a long
+        # time when the device was removed or another process grabbed it.
+        link = self.jlink_native_instance
         self.jlink_native_instance = None
+        if link is not None:
+            lock = getattr(self, "jlink_lock", None)
+
+            def _close_link():
+                acquired = False
+                try:
+                    if lock is None:
+                        acquired = True
+                    else:
+                        acquired = lock.acquire(timeout=0.3)
+                    if acquired:
+                        try:
+                            link.close()
+                        except Exception:
+                            pass
+                finally:
+                    if acquired and lock is not None:
+                        lock.release()
+
+            closer = threading.Thread(
+                target=_close_link, daemon=True, name="jlink-close"
+            )
+            closer.start()
+            closer.join(0.35)
+        self._trace_close("force-close: jlink released")
+
         event.accept()
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
             app.quit()
+        self._trace_close("force-close: exiting")
         if os.environ.get("QT_QPA_PLATFORM", "").lower() != "offscreen":
             os._exit(0)
 
     def closeEvent(self, event):
-        # A window-system close (title-bar X, Alt+F4, taskbar) is an explicit
-        # exit request and must never depend on backend teardown: one wedged
-        # vendor DLL call is enough to keep every graceful retry pending
-        # forever.  Route it straight to the forced exit.
-        if event.spontaneous():
+        # Record the decision inputs: a field report of a hung close is
+        # otherwise indistinguishable from a slow graceful teardown.
+        graceful = bool(getattr(self, "_closing_for_config", False))
+        self._trace_close(
+            f"closeEvent spontaneous={bool(event.spontaneous())} graceful={graceful} "
+            f"flash={self.flash_sequence_active} retries={self._close_retry_count}"
+        )
+        if not graceful:
+            # Title-bar X, Alt+F4, taskbar close, or any internal close that is
+            # not the explicit "return to configuration" action: leave now.
             self._close_destination = "exit"
             self._returning_to_config = False
             self._close_retry_count = 0
-            if self.flash_sequence_active:
-                answer = QMessageBox.question(
-                    self,
-                    "烧录进行中",
-                    "烧录尚未结束，强制退出可能导致芯片无法启动。\n\n仍要强制退出吗？",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if answer != QMessageBox.StandardButton.Yes:
-                    event.ignore()
-                    return
-            self._force_close_from_titlebar(event)
-            return
-        # Only the explicit "return to configuration" action may take the
-        # graceful path; anything else closes the process unconditionally.
-        if not self._returning_to_config:
             self._force_close_from_titlebar(event)
             return
         if self.flash_sequence_active:
@@ -170,4 +198,8 @@ class _WindowCloseMixin:
 
     def _retry_close_after_workers(self):
         self._close_retry_scheduled = False
-        self.close()
+        self._closing_for_config = True
+        try:
+            self.close()
+        finally:
+            self._closing_for_config = False

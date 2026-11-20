@@ -387,10 +387,14 @@ class _WindowBackendMixin:
             return
         self._close_destination = "config"
         self._returning_to_config = True
+        self._closing_for_config = True
         self._close_retry_count = 0
         self.btn_back_config.setEnabled(False)
         self.lbl_status_text.setText("正在安全释放调试连接并返回配置（不会复位 MCU）…")
-        self.close()
+        try:
+            self.close()
+        finally:
+            self._closing_for_config = False
 
     def _close_native_link_async(self, link, next_action=""):
         closer = BackendCloseWorker(link, self.jlink_lock, self)

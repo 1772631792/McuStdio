@@ -2,7 +2,7 @@
 
 > 读者：接手本项目的其他 AI / 新同学。
 > 目标：用最少的时间建立"改哪里、谁调谁、什么不能碰"的整体认知。
-> 本文件描述**重构后的结构**。这次重构只搬运代码、生成 import、拆分文件，**没有改变任何运行时行为**（唯一例外见第 9 节关闭路径，那是重构前就有的独立修复）。
+> 本文件描述**重构后的结构**。重构只搬运代码、生成 import、拆分文件，没有改变运行时行为；唯一的运行行为修复是 V2.5.5 的关闭路径（见第 9 节），它与结构重构分开提交。
 > 使用建议：按符号名检索，不要依赖行号（行号会随修改漂移）。
 
 ---
@@ -87,12 +87,12 @@ ui.py
 | 3 | `ui_parts/login.py` | 725 | `LoginConfigDialog`：配置档、J-Link / OpenOCD 路径、探针扫描、主题 | common、theme、widgets、dialogs |
 | 4 | `ui_parts/window/lifecycle.py` | 757 | `_WindowLifecycleMixin`：构造、`init_ui`、标签页增删/拖出、键盘与事件过滤 | 下层全部 |
 | 4 | `ui_parts/window/elf.py` | 299 | `_WindowElfMixin`：ELF/AXF 解析、符号解析、内存读写、TCL 命令 | 下层全部 |
-| 4 | `ui_parts/window/backend.py` | 489 | `_WindowBackendMixin`：连接/重连/断开、烧录、复位、心跳 | 下层全部 |
+| 4 | `ui_parts/window/backend.py` | 493 | `_WindowBackendMixin`：连接/重连/断开、烧录、复位、心跳 | 下层全部 |
 | 4 | `ui_parts/window/workspace.py` | 425 | `_WindowWorkspaceMixin`：布局、工作区持久化、已保存变量与 ELF 同步、CSV 导出 | 下层全部 |
 | 4 | `ui_parts/window/sampling.py` | 335 | `_WindowSamplingMixin`：采样线程、历史落库、低速表格刷新 | 下层全部 |
 | 4 | `ui_parts/window/variables.py` | 572 | `_WindowVariablesMixin`：变量树右键菜单、通道绑定、内联滑条、RAM 写入队列 | 下层全部 |
 | 4 | `ui_parts/window/plot.py` | 991 | `_WindowPlotMixin`：波形/FFT 绘制、测量、十字光标、绘图右键菜单 | 下层全部 |
-| 4 | `ui_parts/window/close.py` | 173 | `_WindowCloseMixin`：强制退出、优雅关闭、有界重试 | 下层全部 |
+| 4 | `ui_parts/window/close.py` | 205 | `_WindowCloseMixin`：强制退出、优雅关闭、有界重试、关闭诊断日志 | 下层全部 |
 | 5 | `ui_parts/window/window.py` | 96 | 组合 `MCUStudioWindow`（信号 + 类常量 + MRO）与 `run_application()` | 全部 Mixin、common、theme、login |
 | 6 | `ui.py` | 298 | 门面：显式 re-export 上述公开名字 + `__all__` | 上述全部 |
 
@@ -142,7 +142,7 @@ Mixin 职责速查：
 | `_WindowSamplingMixin` | `restart_sampling_thread`、`stop_sampling_thread`、`handle_high_speed_data`、`low_speed_tree_refresh` |
 | `_WindowVariablesMixin` | `show_context_menu`、`bind_tree_item_to_channel`、`enable_inline_slider`、`queue_variable_write`、`remove_variable_root` |
 | `_WindowPlotMixin` | `update_plot_canvas`、`configure_fft`、`_update_fft_plot`、`handle_plot_mouse_move`、`show_plot_context_menu` |
-| `_WindowCloseMixin` | `closeEvent`、`_force_close_from_titlebar`、`_retry_close_after_workers` |
+| `_WindowCloseMixin` | `closeEvent`、`_force_close_from_titlebar`、`_retry_close_after_workers`、`_trace_close` |
 
 ---
 
@@ -292,25 +292,34 @@ FFT 相关逻辑在 `ui_parts/window/plot.py`（`configure_fft`、`_update_fft_p
 
 ---
 
-## 9. 关闭路径（重构前已有的修复，保持现状）
+## 9. 关闭路径（V2.5.5）
 
 ```
 closeEvent（_WindowCloseMixin）
-├─ event.spontaneous()（标题栏 X / Alt+F4 / 任务栏关闭）
-│  ├─ 若正在烧录：确认框，默认"否"
-│  ├─ _close_destination="exit"；_returning_to_config=False
-│  └─ _force_close_from_titlebar() → 保存工作区 → 停定时器/线程 → os._exit(0)
-├─ 非"返回配置"意图 → 同样强制退出
-└─ _returning_to_config=True（仅"返回配置"按钮）
-   ├─ 烧录中/正在重连 → 提示并忽略
+├─ _trace_close(...)  →  %TEMP%\mcu_shutdown_trace.log
+├─ _closing_for_config = False（X / Alt+F4 / 任务栏 / 任何内部 close）
+│  └─ _force_close_from_titlebar()
+│     ├─ 停 UI 定时器
+│     ├─ 采样/写值线程 running=False（不 join）
+│     ├─ 关闭 TCL socket
+│     ├─ 终止本软件启动的 OpenOCD
+│     ├─ daemon 线程持 jlink_lock 关闭 J-Link（最多 350 ms）
+│     └─ os._exit(0)          # 系统回收全部原生句柄（含探针）
+└─ _closing_for_config = True（仅“返回配置”按钮）
+   ├─ 烧录中 / 正在重连 → 提示并忽略
+   ├─ save_workspace_state()（同步，可能等 SQLite 写锁）
    ├─ 停采样（300ms）、写线程（0ms）、历史线程（500ms）
-   ├─ 关闭句柄（异步）
-   ├─ 仍有线程在跑 → 每 250ms 重试，最多 CLOSE_RETRY_LIMIT=8 次（约 2s）
-   │                    └─ 超限 → _force_close_from_titlebar()
+   ├─ 异步关闭句柄
+   ├─ 仍有线程 → 每 250ms 重试，最多 8 次（约 2s）→ 超限强制退出
    └─ session_closed.emit("config") → 回配置页
 ```
 
-设计意图：窗口系统关闭**永远不依赖**后台线程退出；优雅关闭有**时间上限**和**兜底强制退出**。
+关键约束：
+
+- **不依赖 `QCloseEvent.spontaneous()`**。平台差异会让它返回 False；误走优雅关闭就会卡在数据库写锁上。除“返回配置”外一律强制退出。
+- **强制路径禁止**：写数据库、`join()` 线程、直接调用 `JLink.close()`。J-Link 关闭放在 daemon 线程，并有 350 ms 预算。
+- **优雅路径的 `save_workspace_state()` 仍可能等待 SQLite 写锁**（history writer 正在写），它只服务“返回配置”，不要把这段复制回 X 路径。
+- **现场排查**：`%TEMP%\mcu_shutdown_trace.log`。没有 `closeEvent` 行 → GUI 线程在事件到达前已被别处阻塞；有行但停在某步 → 该步阻塞。
 
 ---
 
@@ -369,7 +378,8 @@ python main.py --self-test report.json
 | 项目 | 状态 |
 | --- | --- |
 | `ui.py` 单文件过大 | 已拆分：门面 298 行 + 15 个职责模块 |
-| 关闭流程可能永远关不掉 | 已修复（第 9 节） |
+| 关闭流程卡死/关不掉 | 已修复（V2.5.5，第 9 节） |
+| 关闭时放弃最后约 2 秒的工作区变化 | 设计取舍：X 路径不写数据库 |
 | `jlink_lock` 无超时、原生调用可能阻塞 | **待处理**（需行为层改造） |
 | GUI 线程 `trigger_manual_mcu_reset()` 直接调 DLL | **待处理** |
 | 重连失败使用模态 `QMessageBox.critical`，可能挡住标题栏关闭 | **待处理** |

@@ -1,10 +1,10 @@
-# MCU Live Watch Studio V2.4
+# MCU Live Watch Studio V2.5
 
 用于 Cortex-M 的实时变量监视、在线调参、波形分析和固件烧录工具。
 
 软件读取 ELF/AXF 中的符号和 DWARF 调试信息，通过 SEGGER J-Link DLL 或 OpenOCD 读写 MCU 内存。固件不需要增加串口协议，普通变量监视也不依赖断点。适用于电机控制、数字电源、PID 调参、传感器和现场测试。
 
-![MCU Live Watch Studio V2.4 多变量滑动调参与实时波形](assets/screenshots/v2-workspace-sliders.png)
+![MCU Live Watch Studio V2.5 多变量滑动调参与实时波形](assets/screenshots/v2-workspace-sliders.png)
 
 | 需求 | 对应功能 |
 | --- | --- |
@@ -18,7 +18,7 @@
 
 ## 目录
 
-- [V2.4 重点更新](#v24-重点更新)
+- [V2.5 重点更新](#v25-重点更新)
 - [下载与版本选择](#下载与版本选择)
 - [五分钟开始使用](#五分钟开始使用)
 - [功能说明](#功能说明)
@@ -27,32 +27,30 @@
 - [连接、烧录与退出安全](#连接烧录与退出安全)
 - [源码运行、校验与打包](#源码运行校验与打包)
 
-## V2.4 重点更新
+## V2.5 重点更新
 
-- 配置页只保存和校验设置，不打开 J-Link，也不启动 OpenOCD；进入工作站后才在后台连接探针。
-- 检测到探针被下载器或其他调试软件占用时自动停止读写并断开，关闭外部程序后由用户手动重连。
-- 手动重连成功后重新读取磁盘上最新的 ELF/AXF 一次，再恢复变量采样。
-- 标题栏 X 具有最高退出优先级：停止软件任务、关闭套接字和本软件启动的 OpenOCD 后直接退出，不等待可能卡住的 J-Link DLL。
-- 大变量列表只读取当前可见的标量和已展开结构体中的可见成员；每轮最多处理 32 个叶子变量并轮询其余项目。
-- 顶层变量可以在三个调试窗口之间拖动；结构体成员可拖成独立顶层变量，便于单独观察和打开滑动调节。
-- ELF 和 Keil AXF 均可作为固件与调试信息来源。
-- 便携包自带 OpenOCD，并加入一键创建桌面快捷方式的脚本。
+- 代码结构重构：`ui.py` 拆分为门面 + `ui_parts/` 子包，按职责分为 15 个模块，运行功能不变。
+- 主窗口由 8 个职责 Mixin 组合，变量树、波形、采样、烧录等代码各自独立，便于定位和修改。
+- 标题栏 X 在任何状态（重连中、烧录中）都能退出；返回配置的优雅关闭增加约 2 秒重试上限和强制退出兜底。
+- 关闭时界面线程等待从 2.7 秒降到 0.8 秒以内，避免点击 X 后长时间无响应。
+- 新增 [AI 协作入口](AI.md) 和 [AI 代码地图](doc/AI_ARCHITECTURE.md)，记录模块关系、线程模型和完整调用链。
+- 变量监视、波形、FFT、滑动调节和烧录流程与 V2.4 保持一致，数据库和配置无需迁移。
 
-完整版本变化见 [V2.4 发布说明](doc/releases/RELEASE_NOTES_V2.4.md)和[更新记录](doc/releases/CHANGELOG.md)。
+完整版本变化见 [V2.5 发布说明](doc/releases/RELEASE_NOTES_V2.5.md)和[更新记录](doc/releases/CHANGELOG.md)。
 
 ## 下载与版本选择
 
-[MCU Live Watch Studio V2.4 Release](https://github.com/1772631792/McuStdio/releases/tag/v2.4.0) 提供三个附件：
+[MCU Live Watch Studio V2.5 Release](https://github.com/1772631792/McuStdio/releases/tag/v2.5.0) 提供三个附件：
 
 | 附件 | 适合谁 | 是否包含 OpenOCD | 使用方式 |
 | --- | --- | --- | --- |
-| [Mcu_Studio.exe](https://github.com/1772631792/McuStdio/releases/download/v2.4.0/Mcu_Studio.exe) | 已安装 SEGGER J-Link Software，或希望自行配置 OpenOCD 的用户 | 否 | 下载后直接运行 |
-| [Mcu_Studio_Portable_v2.4.zip](https://github.com/1772631792/McuStdio/releases/download/v2.4.0/Mcu_Studio_Portable_v2.4.zip) | 希望解压即用，或使用 ST-Link、CMSIS-DAP/DAPLink 的用户 | 是 | 完整解压后运行目录中的 EXE |
-| [OpenOCD.zip](https://github.com/1772631792/McuStdio/releases/download/v2.4.0/OpenOCD.zip) | 给单文件版补充 OpenOCD 运行环境 | 仅 OpenOCD | 放到单文件版旁边解压 |
+| [Mcu_Studio.exe](https://github.com/1772631792/McuStdio/releases/download/v2.5.0/Mcu_Studio.exe) | 已安装 SEGGER J-Link Software，或希望自行配置 OpenOCD 的用户 | 否 | 下载后直接运行 |
+| [Mcu_Studio_Portable_v2.5.zip](https://github.com/1772631792/McuStdio/releases/download/v2.5.0/Mcu_Studio_Portable_v2.5.zip) | 希望解压即用，或使用 ST-Link、CMSIS-DAP/DAPLink 的用户 | 是 | 完整解压后运行目录中的 EXE |
+| [OpenOCD.zip](https://github.com/1772631792/McuStdio/releases/download/v2.5.0/OpenOCD.zip) | 给单文件版补充 OpenOCD 运行环境 | 仅 OpenOCD | 放到单文件版旁边解压 |
 
 ### 便携版怎么用
 
-1. 下载 `Mcu_Studio_Portable_v2.4.zip`。
+1. 下载 `Mcu_Studio_Portable_v2.5.zip`。
 2. 完整解压到一个可写目录，不要只从压缩包中单独拖出 EXE。
 3. 运行 `Mcu_Studio/Mcu_Studio.exe`。
 4. 如需桌面图标，双击同目录的 `Create_Desktop_Shortcut.cmd`，它会创建名为 `Mcu_Studio` 的快捷方式。
@@ -350,7 +348,13 @@ McuStdio/
 ├─ main.py                       # 应用入口
 ├─ build.py                      # 单文件版构建入口
 ├─ build_portable.py             # 内置 OpenOCD 的便携版构建入口
-├─ mcu_studio/                   # UI、ELF/数据库核心和后台任务
+├─ AI.md                         # AI 协作入口：模块关系与调用链
+├─ mcu_studio/                   # 程序实现
+│  ├─ core.py                    # ELF/DWARF、数据库、配置、探针发现
+│  ├─ workers.py                 # 全部后台线程
+│  ├─ spectrum.py                # FFT 计算
+│  ├─ ui.py                      # UI 门面（re-export）
+│  └─ ui_parts/                  # UI 实现：主题、控件、对话框、窗口 Mixin
 ├─ assets/                       # 图标与 README 截图
 ├─ runtime/OpenOCD/              # 内置 OpenOCD 与 cfg
 ├─ tools/                        # 校验和 Release 上传工具
@@ -358,10 +362,12 @@ McuStdio/
 ```
 
 - [精简文档目录](doc/README.md)
+- [AI 协作入口](AI.md)
+- [AI 代码地图](doc/AI_ARCHITECTURE.md)
 - [连接与后端](doc/02-连接与后端.md)
 - [变量监视与波形](doc/03-变量监视与波形.md)
 - [构建与发布](doc/06-构建与发布.md)
 - [回归测试矩阵](doc/09-回归测试矩阵.md)
-- [V2.4 发布说明](doc/releases/RELEASE_NOTES_V2.4.md)
+- [V2.5 发布说明](doc/releases/RELEASE_NOTES_V2.5.md)
 
 第三方运行库和工具保留各自许可证。

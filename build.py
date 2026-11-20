@@ -33,6 +33,10 @@ REQUIRED_SOURCE_FILES = (
     PACKAGE_DIR / "core.py",
     PACKAGE_DIR / "workers.py",
     PACKAGE_DIR / "ui.py",
+    # The facade delegates to these packages; a missing one would only surface
+    # as a runtime ImportError inside the packaged EXE.
+    PACKAGE_DIR / "ui_parts" / "__init__.py",
+    PACKAGE_DIR / "ui_parts" / "window" / "__init__.py",
     SPEC_FILE,
     ICON_PNG,
     ICON_FILE,
